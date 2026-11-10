@@ -47,9 +47,9 @@ jobs:
           }
           EOF
           /tmp/skill-trust sign demo-skill --id-token github --services services.json --json | tee sign-result.json
-          test "$(jq -r .hasTlogEntry)" = true
-          test "$(jq -r .identity)" = "$WORKFLOW_IDENTITY"
-          test "$(jq -r .issuer)" = "https://token.actions.githubusercontent.com"
+          test "$(jq -r .hasTlogEntry sign-result.json)" = true
+          test "$(jq -r .identity sign-result.json)" = "$WORKFLOW_IDENTITY"
+          test "$(jq -r .issuer sign-result.json)" = "https://token.actions.githubusercontent.com"
 
       - name: Inspect
         run: /tmp/skill-trust inspect demo-skill
@@ -73,8 +73,8 @@ jobs:
           }
           EOF
           /tmp/skill-trust verify demo-skill --policy policy.json --json | tee verify-result.json
-          test "$(jq -r .decision)" = allow
-          test "$(jq -r '.signatures[0].matched')" = true
+          test "$(jq -r .decision verify-result.json)" = allow
+          test "$(jq -r '.signatures[0].matched' verify-result.json)" = true
 
       - name: Verify (provenance claims)
         run: |
@@ -91,7 +91,7 @@ jobs:
               },
               "provenance": {
                 "sourceRepository": "redhat-et/skill-trust",
-                "workflowName": ".github/workflows/e2e-sign.yml"
+                "workflowName": "e2e-sign"
               },
               "trustRoot": "sigstore",
               "requireTransparencyLog": true
@@ -108,7 +108,7 @@ jobs:
           code=$?
           set -e
           test "$code" = 1
-          test "$(jq -r .decision)" = block
+          test "$(jq -r .decision tamper-result.json)" = block
           jq -e '.findings[] | select(.code == "ST-CONTENT-MISMATCH")' tamper-result.json > /dev/null
 
       - name: Upload evidence
@@ -116,6 +116,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: public-sigstore-evidence
+          include-hidden-files: true
           path: |
             sign-result.json
             verify-result.json
@@ -157,8 +158,8 @@ jobs:
           }
           EOF
           /tmp/skill-trust sign demo-skill --id-token github --services services.json --json | tee sign-result.json
-          test "$(jq -r .hasTlogEntry)" = true
-          test "$(jq -r .identity)" = "$WORKFLOW_IDENTITY"
+          test "$(jq -r .hasTlogEntry sign-result.json)" = true
+          test "$(jq -r .identity sign-result.json)" = "$WORKFLOW_IDENTITY"
 
       - name: Inspect
         run: /tmp/skill-trust inspect demo-skill
@@ -187,8 +188,8 @@ jobs:
           }
           EOF
           /tmp/skill-trust verify demo-skill --policy policy.json --json | tee verify-result.json
-          test "$(jq -r .decision)" = allow
-          test "$(jq -r '.signatures[0].matched')" = true
+          test "$(jq -r .decision verify-result.json)" = allow
+          test "$(jq -r '.signatures[0].matched' verify-result.json)" = true
 
       - name: Tamper must block
         run: |
@@ -198,13 +199,14 @@ jobs:
           code=$?
           set -e
           test "$code" = 1
-          test "$(jq -r .decision)" = block
+          test "$(jq -r .decision tamper-result.json)" = block
 
       - name: Upload evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: rhtas-evidence
+          include-hidden-files: true
           path: |
             sign-result.json
             verify-result.json
