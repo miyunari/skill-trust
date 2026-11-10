@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"time"
 )
 
 // GitHub OIDC runtime environment variables, present in jobs that declare
@@ -26,6 +27,11 @@ var ErrOIDCUnavailable = fmt.Errorf("github oidc token unavailable")
 // GitHubOIDCAudience is the token audience Sigstore Fulcio deployments
 // expect by convention.
 const GitHubOIDCAudience = "sigstore"
+
+// oidcClient bounds the token request. A dedicated client avoids
+// http.DefaultClient's unlimited waits when the caller's context has no
+// deadline and the network stalls.
+var oidcClient = &http.Client{Timeout: 30 * time.Second}
 
 // GitHubOIDCToken fetches an OIDC identity token from the GitHub Actions
 // runtime, requesting the given audience (conventionally "sigstore").
@@ -60,14 +66,19 @@ func GitHubOIDCToken(ctx context.Context, audience string) (string, error) {
 	req.Header.Set("Authorization", "Bearer "+requestToken)
 	req.Header.Set("Accept", "application/json")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := oidcClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("%w: %v", ErrOIDCUnavailable, err)
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	// Read one byte past the 1 MiB cap so a response that was silently
+	// truncated is reported as oversized, not as malformed JSON.
+	body, err := io.ReadAll(io.LimitReader(resp.Body, (1<<20)+1))
 	if err != nil {
 		return "", fmt.Errorf("%w: reading response: %v", ErrOIDCUnavailable, err)
+	}
+	if len(body) > 1<<20 {
+		return "", fmt.Errorf("%w: token response exceeds 1 MiB", ErrOIDCUnavailable)
 	}
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("%w: token endpoint returned %s: %s",

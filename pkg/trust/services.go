@@ -63,11 +63,11 @@ func (s Services) Validate(keyless bool) error {
 func LoadServices(path string) (Services, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
-		return Services{}, fmt.Errorf("%w: %v", ErrServices, err)
+		return Services{}, fmt.Errorf("%w: reading %s: %w", ErrServices, path, err)
 	}
 	var s Services
 	if err := json.Unmarshal(raw, &s); err != nil {
-		return Services{}, fmt.Errorf("%w: %v", ErrServices, err)
+		return Services{}, fmt.Errorf("%w: parsing %s: %w", ErrServices, path, err)
 	}
 	return s, nil
 }

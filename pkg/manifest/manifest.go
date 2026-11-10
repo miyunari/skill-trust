@@ -189,7 +189,10 @@ func Create(dir string) (*Manifest, error) {
 func entryFor(root, rel string) (Entry, error) {
 	full := filepath.Join(root, filepath.FromSlash(rel))
 
-	f, err := os.Open(full)
+	// openNoFollow closes the walk-to-open TOCTOU window: without it, a
+	// regular file seen by WalkDir could be swapped for a symlink before
+	// the open, and hashing would follow it outside the skill root.
+	f, err := openNoFollow(full)
 	if err != nil {
 		return Entry{}, fmt.Errorf("%w: %v", ErrMalformedInput, err)
 	}
@@ -337,18 +340,65 @@ func LoadControlManifest(dir string) (*Manifest, error) {
 // WriteControlManifest writes the canonical serialization of m to
 // .skill-trust/manifest.json under dir. The bytes on disk are exactly the
 // canonical bytes, so the digest of the file equals the manifest digest.
+// The write is atomic: the data lands in a temporary file in the same
+// directory and is renamed into place, so concurrent readers never observe
+// a truncated manifest.
 func (m *Manifest) WriteControlManifest(dir string) error {
 	b, err := m.Canonical()
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Join(dir, ControlDir), 0o755); err != nil {
+	controlDir := filepath.Join(dir, ControlDir)
+	if err := os.MkdirAll(controlDir, 0o755); err != nil {
 		return fmt.Errorf("%w: %v", ErrMalformedInput, err)
 	}
-	if err := os.WriteFile(ControlPath(dir, ManifestFile), b, 0o644); err != nil {
+	if err := writeFileAtomic(ControlPath(dir, ManifestFile), b, 0o644); err != nil {
 		return fmt.Errorf("%w: %v", ErrMalformedInput, err)
 	}
 	return nil
+}
+
+// WriteAtomic writes data to path via a temporary file in the same
+// directory followed by a rename, which is atomic on the same filesystem.
+// It is exported for the signer, which stages control files with the same
+// guarantee.
+func WriteAtomic(path string, data []byte, perm os.FileMode) error {
+	return writeFileAtomic(path, data, perm)
+}
+
+// writeFileAtomic writes data to path via a temporary file in the same
+// directory followed by a rename, which is atomic on the same filesystem.
+//
+// Durability note: the temporary file is fsynced, but the parent
+// directory is not synced after the rename, so the rename itself is not
+// guaranteed to survive a power loss. That is deliberate: crash
+// durability of control files is not part of the contract — signing is
+// idempotent and re-runnable, and every crash-induced partial state
+// (old, new, or missing control files) fails closed at verification.
+// Directory fsyncs would also give up Windows portability, since
+// directories cannot be opened through the os package there.
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName) // no-op after a successful rename
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmpName, perm); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, path)
 }
 
 // Difference describes one mismatch between an embedded (expected)
@@ -376,7 +426,15 @@ const (
 // and the recomputed manifest observed. An empty slice means the content is
 // identical. Version and hash algorithm mismatches are reported and
 // comparison stops, since digests are not comparable across algorithms.
+// A nil manifest is reported as a difference rather than panicking: both
+// are realistic outcomes of fallible loading at call sites.
 func Compare(expected, observed *Manifest) []Difference {
+	if expected == nil || observed == nil {
+		return []Difference{{
+			Kind:    DiffVersion,
+			Details: fmt.Sprintf("nil manifest (expected=%t observed=%t)", expected != nil, observed != nil),
+		}}
+	}
 	if expected.Version != observed.Version {
 		return []Difference{{
 			Kind:    DiffVersion,

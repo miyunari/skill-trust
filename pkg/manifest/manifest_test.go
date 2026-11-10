@@ -499,3 +499,23 @@ func TestJSONShape(t *testing.T) {
 		t.Error("canonical form is not stable across round-trip")
 	}
 }
+
+// TestCompareNilManifests covers nil arguments to Compare: they must be
+// reported as differences, not panic.
+func TestCompareNilManifests(t *testing.T) {
+	m := &Manifest{Version: Version, HashAlgorithm: HashAlgorithm}
+	cases := []struct {
+		name               string
+		expected, observed *Manifest
+	}{
+		{"nil expected", nil, m},
+		{"nil observed", m, nil},
+		{"both nil", nil, nil},
+	}
+	for _, tc := range cases {
+		diffs := Compare(tc.expected, tc.observed)
+		if len(diffs) == 0 {
+			t.Errorf("%s: expected differences, got none", tc.name)
+		}
+	}
+}

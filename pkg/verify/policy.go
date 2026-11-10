@@ -31,12 +31,18 @@ func (d *Duration) UnmarshalJSON(b []byte) error {
 		if err != nil {
 			return fmt.Errorf("invalid duration %q: %w", s, err)
 		}
+		if v < 0 {
+			return fmt.Errorf("invalid duration %q: negative durations are not meaningful (use 0 for no limit)", s)
+		}
 		*d = Duration(v)
 		return nil
 	}
 	var n int64
 	if err := json.Unmarshal(b, &n); err != nil {
 		return fmt.Errorf("invalid duration: %w", err)
+	}
+	if n < 0 {
+		return fmt.Errorf("invalid duration %d: negative durations are not meaningful (use 0 for no limit)", n)
 	}
 	*d = Duration(n)
 	return nil
@@ -222,6 +228,11 @@ func (p *Policy) validateRule(r *SignerRule) error {
 		}
 		if r.PublicKey == nil || (r.PublicKey.Path == "" && r.PublicKey.Raw == "") {
 			return fmt.Errorf("%w: key signer %q requires a publicKey (path or raw)", ErrMalformedInput, r.Name)
+		}
+		if r.PublicKey.Path != "" && r.PublicKey.Raw != "" {
+			// resolveKey prefers path; accepting both would make the
+			// effective key depend on an undocumented precedence rule.
+			return fmt.Errorf("%w: key signer %q sets both publicKey.path and publicKey.raw; specify exactly one", ErrMalformedInput, r.Name)
 		}
 		if r.Provenance != nil && !r.Provenance.empty() {
 			return fmt.Errorf("%w: signer %q combines key mode with provenance constraints, which can never match (key-based signatures carry no certificate claims)", ErrMalformedInput, r.Name)

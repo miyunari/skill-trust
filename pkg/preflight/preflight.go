@@ -117,12 +117,31 @@ type Preflight struct {
 	verified map[string]VerifiedSkill // root path -> record
 }
 
-// New creates a Preflight using the provided Verifier.
+// New creates a Preflight using the provided Verifier. A nil verifier is
+// not rejected here to keep the constructor signature stable, but every
+// verification path fails closed with a structured BlockError (never a
+// panic) when the Preflight was built without one.
 func New(v Verifier) *Preflight {
 	return &Preflight{
 		verifier: v,
 		verified: make(map[string]VerifiedSkill),
 	}
+}
+
+// verifySkill runs the verifier, failing closed when the Preflight was
+// constructed without one.
+func (p *Preflight) verifySkill(root string) (Result, error) {
+	if p.verifier == nil {
+		res := Result{
+			Decision: Block,
+			Findings: []Finding{{
+				Code:    CodeVerifierFailure,
+				Message: "preflight has no verifier (constructed with New(nil))",
+			}},
+		}
+		return res, nil
+	}
+	return p.verifier.VerifySkill(root)
 }
 
 // VerifyBeforeLoad implements step 1-4 of the harness contract: verify the
@@ -135,7 +154,7 @@ func (p *Preflight) VerifyBeforeLoad(dir string) (VerifiedSkill, error) {
 		return VerifiedSkill{}, &BlockError{Code: CodeVerifierFailure, Message: err.Error()}
 	}
 
-	res, err := p.verifier.VerifySkill(abs)
+	res, err := p.verifySkill(abs)
 	if err != nil {
 		return VerifiedSkill{}, &BlockError{
 			Code:               CodeVerifierFailure,
@@ -186,8 +205,15 @@ func (p *Preflight) VerifyBeforeLoad(dir string) (VerifiedSkill, error) {
 func (p *Preflight) GuardExecution(path string) error {
 	abs, err := absPath(path)
 	if err != nil {
-		// An unresolvable path is not under a verified skill root.
-		return nil
+		// Fail closed: absPath tolerates a missing final element, so an
+		// unresolvable path means an unreadable parent or a symlink loop
+		// at the trust boundary — not an ordinary nonexistent command
+		// path. Letting it pass would make enforcement skippable by
+		// making the filesystem weird.
+		return &BlockError{
+			Code:    CodeNotVerified,
+			Message: fmt.Sprintf("cannot resolve guarded path %s: %v", path, err),
+		}
 	}
 
 	root, ok := p.containingRoot(abs)
@@ -195,7 +221,7 @@ func (p *Preflight) GuardExecution(path string) error {
 		return nil
 	}
 
-	res, err := p.verifier.VerifySkill(root)
+	res, err := p.verifySkill(root)
 	if err != nil {
 		return &BlockError{
 			Code:               CodeChangedAfterVerify,
@@ -211,6 +237,18 @@ func (p *Preflight) GuardExecution(path string) error {
 			Message:            fmt.Sprintf("skill %s changed or no longer satisfies policy after it was loaded", root),
 			ExpectedDigest:     p.recordedDigest(root),
 			ObservedDigest:     res.ObservedDigest,
+			UnderlyingFindings: res.Findings,
+		}
+	}
+	// The skill still verifies, but to the same content identity it had
+	// at load time: a re-signed skill (different manifest and bundle that
+	// policy still accepts) must not silently replace loaded content.
+	if res.ManifestDigest != p.recordedDigest(root) {
+		return &BlockError{
+			Code:               CodeChangedAfterVerify,
+			Message:            fmt.Sprintf("skill %s re-verified to a different content identity after it was loaded", root),
+			ExpectedDigest:     p.recordedDigest(root),
+			ObservedDigest:     res.ManifestDigest,
 			UnderlyingFindings: res.Findings,
 		}
 	}

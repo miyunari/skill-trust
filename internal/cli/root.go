@@ -74,8 +74,16 @@ Exit codes: 0 success (verify: allowed), 1 blocked, 2 operational error.`,
 
 // Execute runs the CLI and returns the process exit code.
 func Execute() int {
+	// Reset in case of repeated invocation in one process (tests,
+	// embedding): a previous command's decision must not leak.
+	exitCode = ExitSuccess
 	if err := rootCmd.Execute(); err != nil {
-		// cobra has already printed usage errors.
+		// cobra has already printed usage errors. A command that already
+		// recorded a decision-level code (for example ExitBlocked for a
+		// verify that blocked) keeps it; operational errors are ExitError.
+		if exitCode != ExitSuccess {
+			return exitCode
+		}
 		return ExitError
 	}
 	return exitCode

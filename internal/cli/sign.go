@@ -2,7 +2,9 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"strings"
 
@@ -141,13 +143,17 @@ and RHTAS is a configuration change, not a code change.`,
 
 // resolveServices loads signing services: the --services path when given,
 // else the conventional .skill-trust-services.json when it exists, else
-// the zero value (fully offline key-based signing).
+// the zero value (fully offline key-based signing). Any failure to stat
+// the conventional path other than "does not exist" is an error: silently
+// falling back to offline signing would downgrade the signature mode.
 func resolveServices() (trust.Services, error) {
 	if signServices != "" {
 		return trust.LoadServices(signServices)
 	}
 	if _, err := os.Stat(trust.DefaultServicesPath); err == nil {
 		return trust.LoadServices(trust.DefaultServicesPath)
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return trust.Services{}, fmt.Errorf("stat %s: %w", trust.DefaultServicesPath, err)
 	}
 	return trust.Services{}, nil
 }

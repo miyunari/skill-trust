@@ -337,3 +337,32 @@ func sha256Bytes(t *testing.T, b []byte) []byte {
 	sum := sha256Sum(b)
 	return sum
 }
+
+// TestSignRejectsSymlinkedControlDir covers a tree where .skill-trust is a
+// symlink: signing must refuse rather than write control files through
+// the link to an arbitrary location.
+func TestSignRejectsSymlinkedControlDir(t *testing.T) {
+	dir := testSkill(t)
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(dir, manifest.ControlDir)); err != nil {
+		t.Fatal(err)
+	}
+
+	privPEM, _ := keyPEM(t)
+	keyPath := filepath.Join(t.TempDir(), "release.key")
+	if err := os.WriteFile(keyPath, privPEM, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := Skill(context.Background(), dir, Options{KeyPath: keyPath})
+	if err == nil {
+		t.Fatal("expected signing through a symlinked control dir to fail")
+	}
+	// Nothing may have been written through the symlink.
+	if _, serr := os.Stat(filepath.Join(outside, manifest.ManifestFile)); !os.IsNotExist(serr) {
+		t.Error("control manifest was written outside the skill tree")
+	}
+	if _, serr := os.Stat(filepath.Join(outside, manifest.BundleFile)); !os.IsNotExist(serr) {
+		t.Error("bundle was written outside the skill tree")
+	}
+}

@@ -45,7 +45,9 @@ func LoadFromPEM(pemBytes []byte) (sign.Keypair, error) {
 	priv, err := x509.ParsePKCS8PrivateKey(block.Bytes)
 	if err != nil {
 		if priv, err = x509.ParseECPrivateKey(block.Bytes); err != nil {
-			return nil, fmt.Errorf("parsing private key: %w", err)
+			if priv, err = x509.ParsePKCS1PrivateKey(block.Bytes); err != nil {
+				return nil, fmt.Errorf("parsing private key (tried PKCS8, SEC1 ECDSA, PKCS1): %w", err)
+			}
 		}
 	}
 	signer, ok := priv.(crypto.Signer)
@@ -67,13 +69,18 @@ func LoadFromPEM(pemBytes []byte) (sign.Keypair, error) {
 			return nil, fmt.Errorf("unsupported ECDSA curve: %v", k.Curve)
 		}
 	case *rsa.PublicKey:
-		switch {
-		case k.N.BitLen() >= 4096:
-			details = protocommon.PublicKeyDetails_PKIX_RSA_PKCS1V15_4096_SHA256
-		case k.N.BitLen() >= 3072:
-			details = protocommon.PublicKeyDetails_PKIX_RSA_PKCS1V15_3072_SHA256
-		default:
+		// Label the exact modulus size: silently rounding anything below
+		// 3072 down to the 2048 identifier would mislabel weak keys (for
+		// example 1024-bit) as 2048-bit in the bundle metadata.
+		switch k.N.BitLen() {
+		case 2048:
 			details = protocommon.PublicKeyDetails_PKIX_RSA_PKCS1V15_2048_SHA256
+		case 3072:
+			details = protocommon.PublicKeyDetails_PKIX_RSA_PKCS1V15_3072_SHA256
+		case 4096:
+			details = protocommon.PublicKeyDetails_PKIX_RSA_PKCS1V15_4096_SHA256
+		default:
+			return nil, fmt.Errorf("unsupported RSA modulus size: %d bits (supported: 2048, 3072, 4096)", k.N.BitLen())
 		}
 	default:
 		return nil, fmt.Errorf("unsupported public key type: %T", k)

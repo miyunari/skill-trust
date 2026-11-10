@@ -1,7 +1,9 @@
 package sign
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -67,6 +69,31 @@ func TestGitHubOIDCTokenErrorStatus(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "403") {
 		t.Errorf("error should mention the status: %v", err)
+	}
+}
+
+// TestGitHubOIDCTokenOversizedResponse covers the 1 MiB response cap: a
+// body larger than the cap is reported as oversized rather than falling
+// through to JSON parsing (where truncation would surface as a confusing
+// syntax error).
+func TestGitHubOIDCTokenOversizedResponse(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write(bytes.Repeat([]byte("a"), (1<<20)+1))
+	}))
+	defer ts.Close()
+
+	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_URL", ts.URL)
+	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "runtime-secret")
+
+	_, err := GitHubOIDCToken(t.Context(), "sigstore")
+	if err == nil {
+		t.Fatal("expected an error for an oversized response")
+	}
+	if !errors.Is(err, ErrOIDCUnavailable) {
+		t.Errorf("err = %v, want ErrOIDCUnavailable", err)
+	}
+	if !strings.Contains(err.Error(), "exceeds 1 MiB") {
+		t.Errorf("error should mention the size cap: %v", err)
 	}
 }
 
