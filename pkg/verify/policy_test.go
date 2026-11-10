@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -255,11 +256,14 @@ func TestPolicyRejectsDualKeySpec(t *testing.T) {
 
 // TestPolicyRejectsNegativeDuration covers negative durations in any
 // duration field: they would invert freshness semantics (everything
-// stale, or nothing stale, depending on comparison direction).
+// stale, or nothing stale, depending on comparison direction). Both the
+// string and integer JSON forms must reach Duration.UnmarshalJSON and be
+// rejected by the negative guard specifically — asserting the message
+// keeps the cases from passing for an unrelated parse error.
 func TestPolicyRejectsNegativeDuration(t *testing.T) {
 	cases := []string{
-		`-1h`,  // string form
-		`-300`, // integer (nanoseconds) form
+		`"-1h"`, // string form (quoted: valid JSON, reaches UnmarshalJSON)
+		`-300`,  // integer (nanoseconds) form
 	}
 	for _, d := range cases {
 		doc := `{
@@ -274,8 +278,13 @@ func TestPolicyRejectsNegativeDuration(t *testing.T) {
     }
   ]
 }`
-		if _, err := ParsePolicy([]byte(doc)); err == nil {
-			t.Errorf("expected ParsePolicy to reject negative duration %q", d)
+		_, err := ParsePolicy([]byte(doc))
+		if err == nil {
+			t.Errorf("expected ParsePolicy to reject negative duration %s", d)
+			continue
+		}
+		if !strings.Contains(err.Error(), "negative durations") {
+			t.Errorf("duration %s rejected for the wrong reason: %v", d, err)
 		}
 	}
 }

@@ -368,6 +368,15 @@ func WriteAtomic(path string, data []byte, perm os.FileMode) error {
 
 // writeFileAtomic writes data to path via a temporary file in the same
 // directory followed by a rename, which is atomic on the same filesystem.
+//
+// Durability note: the temporary file is fsynced, but the parent
+// directory is not synced after the rename, so the rename itself is not
+// guaranteed to survive a power loss. That is deliberate: crash
+// durability of control files is not part of the contract — signing is
+// idempotent and re-runnable, and every crash-induced partial state
+// (old, new, or missing control files) fails closed at verification.
+// Directory fsyncs would also give up Windows portability, since
+// directories cannot be opened through the os package there.
 func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*")
 	if err != nil {

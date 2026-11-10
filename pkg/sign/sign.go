@@ -306,6 +306,17 @@ func marshalBundle(pb *protobundle.Bundle) ([]byte, error) {
 // directory or control files are symlinks: writing through them could
 // place the control files (or overwrite existing files) outside the
 // skill tree.
+//
+// Best-effort note: the check and the writes are separate operations, so
+// a concurrent writer with write access to the tree could swap in a
+// symlink between them. That race is outside the threat model: signing
+// is not a defense against a hostile concurrent writer to the source
+// tree (such a writer can equally change content after the manifest
+// walk), and every resulting inconsistent state — control files outside
+// the tree, missing, or stale — fails closed at verification, which
+// recomputes the manifest from content. Go's os package has no
+// directory-handle-relative create/rename, so closing the window would
+// require syscall-level, platform-specific I/O for no integrity gain.
 func rejectControlSymlinks(dir string) error {
 	controlDir := filepath.Join(dir, manifest.ControlDir)
 	paths := []string{
