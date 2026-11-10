@@ -124,10 +124,19 @@ reads metadata only. Use verify for enforcement.`,
 		if bi.KeyHint != "" {
 			fmt.Fprintf(w, "signer:    key (hint %s)\n", bi.KeyHint)
 		}
-		if bi.Identity != "" {
+		// Cert metadata is keyed off the certificate, not off a non-empty
+		// identity: a cert without URI or email SANs still has an issuer
+		// and a validity window worth reporting.
+		if bi.HasCert {
 			fmt.Fprintf(w, "signer:    keyless\n")
-			fmt.Fprintf(w, "identity:  %s\n", bi.Identity)
-			fmt.Fprintf(w, "issuer:    %s\n", bi.Issuer)
+			if bi.Identity != "" {
+				fmt.Fprintf(w, "identity:  %s\n", bi.Identity)
+			} else {
+				fmt.Fprintf(w, "identity:  (certificate has no URI or email SAN)\n")
+			}
+			if bi.Issuer != "" {
+				fmt.Fprintf(w, "issuer:    %s\n", bi.Issuer)
+			}
 			fmt.Fprintf(w, "cert:      valid %s to %s\n",
 				bi.NotBefore.Format(time.RFC3339), bi.NotAfter.Format(time.RFC3339))
 		}
@@ -156,6 +165,7 @@ func plural(n int, one, many string) string {
 type bundleInfo struct {
 	Present        bool       `json:"present"`
 	MediaType      string     `json:"mediaType,omitempty"`
+	HasCert        bool       `json:"hasCert,omitempty"`
 	Identity       string     `json:"identity,omitempty"`
 	Issuer         string     `json:"issuer,omitempty"`
 	NotBefore      time.Time  `json:"notBefore,omitempty"`
@@ -183,6 +193,10 @@ func describeBundle(pb *protobundle.Bundle) bundleInfo {
 	}
 
 	if cert := parseBundleCert(pb); cert != nil {
+		info.HasCert = true
+		// Identity preference: URI SANs (Fulcio workflow identity) over
+		// email SANs; within a type, the certificate's own ordering is
+		// stable, so selection is deterministic for a given bundle.
 		if len(cert.URIs) > 0 {
 			info.Identity = cert.URIs[0].String()
 		} else if len(cert.EmailAddresses) > 0 {

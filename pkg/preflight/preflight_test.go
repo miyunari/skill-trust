@@ -253,3 +253,92 @@ func TestNestedSkillRootsUseLongestMatch(t *testing.T) {
 		t.Fatal("outer skill should fail closed when its content (the nested skill) changed")
 	}
 }
+
+// TestNilVerifierFailsClosed covers Preflight construction without a
+// verifier: every verification path must fail closed with a structured
+// BlockError, never a panic.
+func TestNilVerifierFailsClosed(t *testing.T) {
+	p := New(nil)
+
+	_, err := p.VerifyBeforeLoad(fixture(t))
+	if err == nil {
+		t.Fatal("expected VerifyBeforeLoad to fail closed without a verifier")
+	}
+	var be *BlockError
+	if !errors.As(err, &be) {
+		t.Fatalf("err = %T, want *BlockError", err)
+	}
+	if be.Code != CodeVerifierFailure {
+		t.Errorf("code = %s, want %s", be.Code, CodeVerifierFailure)
+	}
+}
+
+// TestGuardExecutionFailsClosedOnUnresolvablePath covers a guarded path
+// whose parent chain cannot be resolved (here: a symlink loop). Blocking
+// is required: the old behavior returned nil, making enforcement skippable
+// by making the filesystem weird.
+func TestGuardExecutionFailsClosedOnUnresolvablePath(t *testing.T) {
+	dir := fixture(t)
+	p := New(ManifestVerifier{})
+	if _, err := p.VerifyBeforeLoad(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	loop := filepath.Join(t.TempDir(), "loop")
+	if err := os.Symlink(loop, loop); err != nil {
+		t.Fatal(err)
+	}
+
+	err := p.GuardExecution(filepath.Join(loop, "anything.sh"))
+	if err == nil {
+		t.Fatal("expected block for unresolvable guarded path")
+	}
+	var be *BlockError
+	if !errors.As(err, &be) {
+		t.Fatalf("err = %T, want *BlockError", err)
+	}
+	if be.Code != CodeNotVerified {
+		t.Errorf("code = %s, want %s", be.Code, CodeNotVerified)
+	}
+}
+
+// TestGuardExecutionBlocksResignedSkill covers the case where a skill is
+// re-signed (new manifest, content the verifier still accepts) after it
+// was loaded: the content identity at load time must hold, or execution
+// is blocked as changed-after-verify.
+func TestGuardExecutionBlocksResignedSkill(t *testing.T) {
+	dir := fixture(t)
+	p := New(ManifestVerifier{})
+	if _, err := p.VerifyBeforeLoad(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	// Re-sign: change content and regenerate the embedded manifest. The
+	// skill still verifies (embedded matches observed), but its content
+	// identity differs from the one recorded at load time.
+	if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte("---\nname: t2\n---\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m, err := manifest.Create(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.WriteControlManifest(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	err = p.GuardExecution(filepath.Join(dir, "SKILL.md"))
+	if err == nil {
+		t.Fatal("expected block for re-signed skill")
+	}
+	var be *BlockError
+	if !errors.As(err, &be) {
+		t.Fatalf("err = %T, want *BlockError", err)
+	}
+	if be.Code != CodeChangedAfterVerify {
+		t.Errorf("code = %s, want %s", be.Code, CodeChangedAfterVerify)
+	}
+	if be.ExpectedDigest == "" || be.ObservedDigest == "" || be.ExpectedDigest == be.ObservedDigest {
+		t.Errorf("digests not reported: expected=%q observed=%q", be.ExpectedDigest, be.ObservedDigest)
+	}
+}

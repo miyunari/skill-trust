@@ -145,6 +145,13 @@ func Skill(ctx context.Context, dir string, opts Options) (*Result, error) {
 		return nil, fmt.Errorf("%w: %v", ErrSigningFailed, err)
 	}
 
+	// Signing must never write outside the skill tree: a pre-existing
+	// symlink for the control directory or a control file could redirect
+	// the writes to an arbitrary path in an attacker-controlled tree.
+	if err := rejectControlSymlinks(dir); err != nil {
+		return nil, err
+	}
+
 	if err := m.WriteControlManifest(dir); err != nil {
 		return nil, fmt.Errorf("writing manifest control file: %w", err)
 	}
@@ -152,7 +159,11 @@ func Skill(ctx context.Context, dir string, opts Options) (*Result, error) {
 	if err := os.MkdirAll(filepath.Dir(bundlePath), 0o755); err != nil {
 		return nil, fmt.Errorf("writing bundle: %w", err)
 	}
-	if err := os.WriteFile(bundlePath, bundleJSON, 0o644); err != nil {
+	// Each control file lands atomically (temp + rename), so readers
+	// never observe a torn file. A partially updated pair — new manifest
+	// with an old bundle or vice versa — fails closed at verification
+	// (the signature is checked over the embedded manifest's bytes).
+	if err := manifest.WriteAtomic(bundlePath, bundleJSON, 0o644); err != nil {
 		return nil, fmt.Errorf("writing bundle: %w", err)
 	}
 
@@ -289,6 +300,25 @@ func marshalBundle(pb *protobundle.Bundle) ([]byte, error) {
 		return nil, err
 	}
 	return buf.Bytes(), nil
+}
+
+// rejectControlSymlinks refuses to sign into a tree whose control
+// directory or control files are symlinks: writing through them could
+// place the control files (or overwrite existing files) outside the
+// skill tree.
+func rejectControlSymlinks(dir string) error {
+	controlDir := filepath.Join(dir, manifest.ControlDir)
+	paths := []string{
+		controlDir,
+		filepath.Join(controlDir, manifest.ManifestFile),
+		filepath.Join(controlDir, manifest.BundleFile),
+	}
+	for _, p := range paths {
+		if fi, err := os.Lstat(p); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("%w: %s is a symlink; refusing to write through it", ErrSigningFailed, p)
+		}
+	}
+	return nil
 }
 
 func certificateFromBundle(pb *protobundle.Bundle) *x509.Certificate {

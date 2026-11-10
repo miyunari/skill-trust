@@ -230,3 +230,52 @@ func TestPolicyJSONRoundTrip(t *testing.T) {
 		t.Errorf("round-tripped maxAge = %v, want 1h", got)
 	}
 }
+
+// TestPolicyRejectsDualKeySpec covers a key signer that sets both
+// publicKey.path and publicKey.raw: the effective key must not depend on
+// an undocumented precedence rule.
+func TestPolicyRejectsDualKeySpec(t *testing.T) {
+	_, pubPath := keyFiles(t)
+	raw := "LS0tLS1CRUdJTiBQVUJMSUMgS0VZLS0tLS0tCg==" // placeholder PEM
+	doc := `{
+  "apiVersion": "skill-trust.policy/v1",
+  "name": "test",
+  "signers": [
+    {
+      "name": "release-key",
+      "mode": "key",
+      "publicKey": {"path": "` + pubPath + `", "raw": "` + raw + `" }
+    }
+  ]
+}`
+	if _, err := ParsePolicy([]byte(doc)); err == nil {
+		t.Fatal("expected ParsePolicy to reject publicKey.path and publicKey.raw together")
+	}
+}
+
+// TestPolicyRejectsNegativeDuration covers negative durations in any
+// duration field: they would invert freshness semantics (everything
+// stale, or nothing stale, depending on comparison direction).
+func TestPolicyRejectsNegativeDuration(t *testing.T) {
+	cases := []string{
+		`-1h`,  // string form
+		`-300`, // integer (nanoseconds) form
+	}
+	for _, d := range cases {
+		doc := `{
+  "apiVersion": "skill-trust.policy/v1",
+  "name": "test",
+  "signers": [
+    {
+      "name": "release-key",
+      "mode": "key",
+      "publicKey": {"raw": "LS0tLS1CRUdJTiBQVUJMSUMgS0VZLS0tLS0tCg=="},
+      "maxSignatureAge": ` + d + `
+    }
+  ]
+}`
+		if _, err := ParsePolicy([]byte(doc)); err == nil {
+			t.Errorf("expected ParsePolicy to reject negative duration %q", d)
+		}
+	}
+}

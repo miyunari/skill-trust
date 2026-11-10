@@ -333,7 +333,12 @@ func (v *Verifier) VerifySkill(dir string) (Result, error) {
 		res.Signatures = append(res.Signatures, sr)
 		if sr.Matched {
 			matched = true
-			res.Signer = describeSigner(sr)
+			// Attribution is the first matching rule in policy order:
+			// deterministic and stable regardless of how many rules
+			// match.
+			if res.Signer == "" {
+				res.Signer = describeSigner(sr)
+			}
 		}
 	}
 	if !matched {

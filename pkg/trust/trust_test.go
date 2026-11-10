@@ -172,3 +172,21 @@ func TestPublicTrustedRootJSONShape(t *testing.T) {
 		t.Fatalf("embedded root does not load: %v", err)
 	}
 }
+
+// TestLoadKeysFromPEMRejectsDuplicateKeys covers PEM data containing the
+// same public key twice: silent deduplication would hide a configuration
+// mistake.
+func TestLoadKeysFromPEMRejectsDuplicateKeys(t *testing.T) {
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pemBytes, err := publicPEM(t, &priv.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	doubled := append(append([]byte{}, pemBytes...), pemBytes...)
+	if _, err := LoadKeysFromPEM(doubled); err == nil {
+		t.Fatal("expected duplicate public key to be rejected")
+	}
+}

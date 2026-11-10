@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sort"
 	"time"
 
 	"github.com/sigstore/sigstore-go/pkg/root"
@@ -92,9 +93,13 @@ func (c *Config) Material(names ...string) (root.TrustedMaterial, error) {
 		return nil, fmt.Errorf("%w: nil trust configuration", ErrTrustUnavailable)
 	}
 	if len(names) == 0 {
+		// Sort the names: map iteration order is randomized, and the
+		// collection's order determines which root a verifier tries
+		// first, which should not vary run to run.
 		for name := range c.TrustRoots {
 			names = append(names, name)
 		}
+		sort.Strings(names)
 	}
 	var collection root.TrustedMaterialCollection
 	for _, name := range names {
@@ -213,6 +218,11 @@ func LoadKeysFromPEM(pemBytes []byte) (*KeyMaterial, error) {
 		hint, err := KeyHint(pub)
 		if err != nil {
 			return nil, fmt.Errorf("%w: %v", ErrTrustUnavailable, err)
+		}
+		if _, dup := km.verifiers[hint]; dup {
+			// Duplicate keys in trust material are almost certainly a
+			// configuration mistake; accepting them silently hides it.
+			return nil, fmt.Errorf("%w: duplicate public key (hint %s) in PEM data", ErrTrustUnavailable, hint)
 		}
 		verifier, err := signature.LoadVerifier(pub, crypto.SHA256)
 		if err != nil {
