@@ -109,15 +109,15 @@ func CommandPaths(command, cwd string) []string {
 
 // Path and command keys for tool input extraction
 var pathKeys = map[string]bool{
-	"file_path":    true,
-	"path":         true,
+	"file_path":     true,
+	"path":          true,
 	"notebook_path": true,
-	"filePath":     true,
-	"directory":    true,
-	"dir":          true,
-	"workdir":      true,
-	"cwd":          true,
-	"folder":       true,
+	"filePath":      true,
+	"directory":     true,
+	"dir":           true,
+	"workdir":       true,
+	"cwd":           true,
+	"folder":        true,
 }
 
 var commandKeys = map[string]bool{

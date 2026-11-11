@@ -142,24 +142,55 @@ func buildConfig(cwd string, stderr io.Writer) claudecode.Config {
 			if path == "" {
 				return nil, fmt.Errorf("policy path not configured")
 			}
-			p, err := verify.LoadPolicy(path)
+
+			// Read policy JSON and resolve relative paths BEFORE parsing
+			// (ParsePolicy loads public keys, so paths must be absolute first)
+			policyData, err := os.ReadFile(path)
 			if err != nil {
-				return nil, err
+				return nil, fmt.Errorf("reading policy: %w", err)
 			}
 
-			// Resolve relative paths in policy against policy file's directory
+			// Parse as generic JSON to mutate paths
+			var policyJSON map[string]any
+			if err := json.Unmarshal(policyData, &policyJSON); err != nil {
+				return nil, fmt.Errorf("parsing policy JSON: %w", err)
+			}
+
+			// Resolve relative paths in signers
 			policyDir := filepath.Dir(path)
-			for i := range p.Signers {
-				s := &p.Signers[i]
-				if s.PublicKey != nil && s.PublicKey.Path != "" && !filepath.IsAbs(s.PublicKey.Path) {
-					s.PublicKey.Path = filepath.Join(policyDir, s.PublicKey.Path)
+			if signers, ok := policyJSON["signers"].([]any); ok {
+				for _, signer := range signers {
+					if s, ok := signer.(map[string]any); ok {
+						if pubKey, ok := s["publicKey"].(map[string]any); ok {
+							if keyPath, ok := pubKey["path"].(string); ok && keyPath != "" && !filepath.IsAbs(keyPath) {
+								pubKey["path"] = filepath.Join(policyDir, keyPath)
+							}
+						}
+					}
 				}
 			}
-			for name, root := range p.TrustRoots {
-				if root.Path != "" && !filepath.IsAbs(root.Path) {
-					root.Path = filepath.Join(policyDir, root.Path)
-					p.TrustRoots[name] = root
+
+			// Resolve relative paths in trustRoots
+			if trustRoots, ok := policyJSON["trustRoots"].(map[string]any); ok {
+				for name, root := range trustRoots {
+					if r, ok := root.(map[string]any); ok {
+						if rootPath, ok := r["path"].(string); ok && rootPath != "" && !filepath.IsAbs(rootPath) {
+							r["path"] = filepath.Join(policyDir, rootPath)
+							trustRoots[name] = r
+						}
+					}
 				}
+			}
+
+			// Re-marshal and parse with verify.ParsePolicy
+			modifiedData, err := json.Marshal(policyJSON)
+			if err != nil {
+				return nil, fmt.Errorf("marshaling modified policy: %w", err)
+			}
+
+			p, err := verify.ParsePolicy(modifiedData)
+			if err != nil {
+				return nil, err
 			}
 
 			v, err := verify.New(p)

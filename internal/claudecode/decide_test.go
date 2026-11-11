@@ -40,15 +40,15 @@ func TestDecideTable(t *testing.T) {
 	now := time.Now()
 
 	tests := []struct {
-		name           string
-		verifyResult   preflight.Result
-		prev           *Record
-		strict         bool
-		wantAllowed    bool
-		wantBlockCode  string
-		wantWarning    bool
-		wantNewRecord  bool
-		wantRecordNil  bool // for sticky rows
+		name          string
+		verifyResult  preflight.Result
+		prev          *Record
+		strict        bool
+		wantAllowed   bool
+		wantBlockCode string
+		wantWarning   bool
+		wantNewRecord bool
+		wantRecordNil bool // for sticky rows
 	}{
 		// Row: allow + no previous record + strict=true → allow, record digest
 		{

@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/redhat-et/skill-trust/internal/claudecode"
+	"github.com/redhat-et/skill-trust/pkg/manifest"
 )
 
 // setupHookTest creates a home directory with a skill and returns the skill root.
@@ -91,6 +92,65 @@ func runHook(t *testing.T, subcommand string, input []byte, extraArgs ...string)
 	return code, buf.String()
 }
 
+// copyDirPreservingModes copies a directory tree, preserving file modes.
+func copyDirPreservingModes(t *testing.T, src, dst string) {
+	t.Helper()
+	err := filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+
+		relPath, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+
+		dstPath := filepath.Join(dst, relPath)
+
+		if info.IsDir() {
+			return os.MkdirAll(dstPath, info.Mode())
+		}
+
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+
+		return os.WriteFile(dstPath, data, info.Mode())
+	})
+	if err != nil {
+		t.Fatalf("copyDirPreservingModes: %v", err)
+	}
+}
+
+// loadProbeFixture loads a probe fixture JSON, allowing field overwrites.
+func loadProbeFixture(t *testing.T, name string, overwrites map[string]any) []byte {
+	t.Helper()
+
+	fixturePath := filepath.Join("testdata", "claudecode", name+".json")
+	data, err := os.ReadFile(fixturePath)
+	if err != nil {
+		t.Fatalf("reading probe fixture %s: %v", name, err)
+	}
+
+	var input map[string]any
+	if err := json.Unmarshal(data, &input); err != nil {
+		t.Fatalf("parsing probe fixture %s: %v", name, err)
+	}
+
+	// Apply overwrites
+	for k, v := range overwrites {
+		input[k] = v
+	}
+
+	result, err := json.Marshal(input)
+	if err != nil {
+		t.Fatalf("marshaling probe fixture: %v", err)
+	}
+
+	return result
+}
+
 func TestPreToolUseAllowsVerifiedSkill(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -126,21 +186,28 @@ func TestPreToolUseDeniesTamperedRead(t *testing.T) {
 	t.Setenv("CLAUDE_PLUGIN_DATA", filepath.Join(home, ".claude"))
 	t.Setenv("CLAUDE_PROJECT_DIR", "")
 
-	setupHookTest(t, home, "cli-test", true)
+	skillRoot := setupHookTest(t, home, "cli-test", true)
 	policyPath := filepath.Join(home, "policy.json")
 
-	input := `{
-		"session_id": "test-session",
-		"cwd": "/tmp",
-		"hook_event_name": "PreToolUse",
-		"tool_name": "Read",
-		"tool_input": {
-			"file_path": "` + filepath.Join(home, ".claude/skills/cli-test/SKILL.md") + `"
-		},
-		"permission_mode": "default"
-	}`
+	// Compute observed digest of tampered skill
+	m, err := manifest.Create(skillRoot)
+	if err != nil {
+		t.Fatalf("computing manifest: %v", err)
+	}
+	observedDigest, err := m.Digest()
+	if err != nil {
+		t.Fatalf("computing digest: %v", err)
+	}
 
-	code, out := runHook(t, "pre-tool-use", []byte(input), "--policy", policyPath)
+	input := loadProbeFixture(t, "pretooluse-read", map[string]any{
+		"session_id": "test-session",
+		"cwd":        "/tmp",
+		"tool_input": map[string]any{
+			"file_path": filepath.Join(skillRoot, "SKILL.md"),
+		},
+	})
+
+	code, out := runHook(t, "pre-tool-use", input, "--policy", policyPath)
 	if code != ExitSuccess {
 		t.Fatalf("exit = %d, expected 0 (hooks don't error on deny), output:\n%s", code, out)
 	}
@@ -163,6 +230,9 @@ func TestPreToolUseDeniesTamperedRead(t *testing.T) {
 	if !strings.Contains(reason, "ST-") {
 		t.Errorf("reason should contain ST- code, got: %s", reason)
 	}
+	if !strings.Contains(reason, observedDigest) {
+		t.Errorf("reason should contain observed digest %s, got: %s", observedDigest, reason)
+	}
 }
 
 func TestPreToolUseDeniesTamperedBash(t *testing.T) {
@@ -174,18 +244,25 @@ func TestPreToolUseDeniesTamperedBash(t *testing.T) {
 	skillRoot := setupHookTest(t, home, "cli-test", true)
 	policyPath := filepath.Join(home, "policy.json")
 
-	input := `{
-		"session_id": "test-session",
-		"cwd": "/tmp",
-		"hook_event_name": "PreToolUse",
-		"tool_name": "Bash",
-		"tool_input": {
-			"command": "bash ` + filepath.Join(skillRoot, "scripts/run.sh") + `"
-		},
-		"permission_mode": "default"
-	}`
+	// Compute observed digest
+	m, err := manifest.Create(skillRoot)
+	if err != nil {
+		t.Fatalf("computing manifest: %v", err)
+	}
+	observedDigest, err := m.Digest()
+	if err != nil {
+		t.Fatalf("computing digest: %v", err)
+	}
 
-	code, out := runHook(t, "pre-tool-use", []byte(input), "--policy", policyPath)
+	input := loadProbeFixture(t, "pretooluse-bash", map[string]any{
+		"session_id": "test-session",
+		"cwd":        "/tmp",
+		"tool_input": map[string]any{
+			"command": "bash " + filepath.Join(skillRoot, "scripts/run.sh"),
+		},
+	})
+
+	code, out := runHook(t, "pre-tool-use", input, "--policy", policyPath)
 	if code != ExitSuccess {
 		t.Fatalf("exit = %d, expected 0, output:\n%s", code, out)
 	}
@@ -198,6 +275,14 @@ func TestPreToolUseDeniesTamperedBash(t *testing.T) {
 	hookOutput := result["hookSpecificOutput"].(map[string]any)
 	if hookOutput["permissionDecision"] != "deny" {
 		t.Errorf("permissionDecision = %v, want deny", hookOutput["permissionDecision"])
+	}
+
+	reason := hookOutput["permissionDecisionReason"].(string)
+	if !strings.Contains(reason, "ST-") {
+		t.Errorf("reason should contain ST- code, got: %s", reason)
+	}
+	if !strings.Contains(reason, observedDigest) {
+		t.Errorf("reason should contain observed digest %s, got: %s", observedDigest, reason)
 	}
 }
 
@@ -210,18 +295,25 @@ func TestPreToolUseDeniesTamperedPython(t *testing.T) {
 	skillRoot := setupHookTest(t, home, "cli-test", true)
 	policyPath := filepath.Join(home, "policy.json")
 
-	input := `{
-		"session_id": "test-session",
-		"cwd": "` + skillRoot + `",
-		"hook_event_name": "PreToolUse",
-		"tool_name": "Bash",
-		"tool_input": {
-			"command": "python3 scripts/util.py"
-		},
-		"permission_mode": "default"
-	}`
+	// Compute observed digest
+	m, err := manifest.Create(skillRoot)
+	if err != nil {
+		t.Fatalf("computing manifest: %v", err)
+	}
+	observedDigest, err := m.Digest()
+	if err != nil {
+		t.Fatalf("computing digest: %v", err)
+	}
 
-	code, out := runHook(t, "pre-tool-use", []byte(input), "--policy", policyPath)
+	input := loadProbeFixture(t, "pretooluse-bash", map[string]any{
+		"session_id": "test-session",
+		"cwd":        skillRoot,
+		"tool_input": map[string]any{
+			"command": "python3 scripts/util.py",
+		},
+	})
+
+	code, out := runHook(t, "pre-tool-use", input, "--policy", policyPath)
 	if code != ExitSuccess {
 		t.Fatalf("exit = %d, expected 0, output:\n%s", code, out)
 	}
@@ -234,6 +326,14 @@ func TestPreToolUseDeniesTamperedPython(t *testing.T) {
 	hookOutput := result["hookSpecificOutput"].(map[string]any)
 	if hookOutput["permissionDecision"] != "deny" {
 		t.Errorf("permissionDecision = %v, want deny", hookOutput["permissionDecision"])
+	}
+
+	reason := hookOutput["permissionDecisionReason"].(string)
+	if !strings.Contains(reason, "ST-") {
+		t.Errorf("reason should contain ST- code, got: %s", reason)
+	}
+	if !strings.Contains(reason, observedDigest) {
+		t.Errorf("reason should contain observed digest %s, got: %s", observedDigest, reason)
 	}
 }
 
@@ -243,21 +343,28 @@ func TestPreToolUseDeniesTamperedSkillTool(t *testing.T) {
 	t.Setenv("CLAUDE_PLUGIN_DATA", filepath.Join(home, ".claude"))
 	t.Setenv("CLAUDE_PROJECT_DIR", "")
 
-	setupHookTest(t, home, "cli-test", true)
+	skillRoot := setupHookTest(t, home, "cli-test", true)
 	policyPath := filepath.Join(home, "policy.json")
 
-	input := `{
-		"session_id": "test-session",
-		"cwd": "/tmp",
-		"hook_event_name": "PreToolUse",
-		"tool_name": "Skill",
-		"tool_input": {
-			"skill": "cli-test"
-		},
-		"permission_mode": "default"
-	}`
+	// Compute observed digest
+	m, err := manifest.Create(skillRoot)
+	if err != nil {
+		t.Fatalf("computing manifest: %v", err)
+	}
+	observedDigest, err := m.Digest()
+	if err != nil {
+		t.Fatalf("computing digest: %v", err)
+	}
 
-	code, out := runHook(t, "pre-tool-use", []byte(input), "--policy", policyPath)
+	input := loadProbeFixture(t, "pretooluse-skill", map[string]any{
+		"session_id": "test-session",
+		"cwd":        "/tmp",
+		"tool_input": map[string]any{
+			"skill": "cli-test",
+		},
+	})
+
+	code, out := runHook(t, "pre-tool-use", input, "--policy", policyPath)
 	if code != ExitSuccess {
 		t.Fatalf("exit = %d, expected 0, output:\n%s", code, out)
 	}
@@ -270,6 +377,14 @@ func TestPreToolUseDeniesTamperedSkillTool(t *testing.T) {
 	hookOutput := result["hookSpecificOutput"].(map[string]any)
 	if hookOutput["permissionDecision"] != "deny" {
 		t.Errorf("permissionDecision = %v, want deny", hookOutput["permissionDecision"])
+	}
+
+	reason := hookOutput["permissionDecisionReason"].(string)
+	if !strings.Contains(reason, "ST-") {
+		t.Errorf("reason should contain ST- code, got: %s", reason)
+	}
+	if !strings.Contains(reason, observedDigest) {
+		t.Errorf("reason should contain observed digest %s, got: %s", observedDigest, reason)
 	}
 }
 
@@ -485,41 +600,89 @@ func TestPreToolUseRelativePolicyPaths(t *testing.T) {
 	t.Setenv("CLAUDE_PLUGIN_DATA", filepath.Join(home, ".claude"))
 	t.Setenv("CLAUDE_PROJECT_DIR", "")
 
-	setupHookTest(t, home, "cli-test", false)
+	// Copy valid-complete skill to HOME/.claude/skills/valid-complete
+	skillDst := filepath.Join(home, ".claude", "skills", "valid-complete")
+	skillSrc := filepath.Join("..", "..", "testdata", "fixtures", "valid-complete")
+	copyDirPreservingModes(t, skillSrc, skillDst)
 
-	// Copy policy to a relative location from cwd
+	// Copy policy.json and fixtures.pub to a separate temp policy dir
 	policyDir := t.TempDir()
-	_, pubPath := newKey(t)
-	policyPath := keyPolicy(t, pubPath)
-	policyData, err := os.ReadFile(policyPath)
+	policySrc := filepath.Join("..", "..", "testdata", "fixtures", "policy.json")
+	pubSrc := filepath.Join("..", "..", "testdata", "fixtures", "fixtures.pub")
+	policyDst := filepath.Join(policyDir, "policy.json")
+	pubDst := filepath.Join(policyDir, "fixtures.pub")
+
+	policyData, err := os.ReadFile(policySrc)
 	if err != nil {
 		t.Fatal(err)
 	}
-	relPolicyPath := filepath.Join(policyDir, "policy.json")
-	if err := os.WriteFile(relPolicyPath, policyData, 0o644); err != nil {
+	if err := os.WriteFile(policyDst, policyData, 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	input := `{
+	pubData, err := os.ReadFile(pubSrc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(pubDst, pubData, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Load probe fixture BEFORE changing cwd
+	origCwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Set hook-input cwd to yet another temp dir (do this before chdir)
+	hookCwd := t.TempDir()
+
+	// Positive test: Read SKILL.md from valid-complete
+	input := loadProbeFixture(t, "pretooluse-read", map[string]any{
 		"session_id": "test-session",
-		"cwd": "` + policyDir + `",
-		"hook_event_name": "PreToolUse",
-		"tool_name": "Skill",
-		"tool_input": {
-			"skill": "cli-test"
+		"cwd":        hookCwd,
+		"tool_input": map[string]any{
+			"file_path": filepath.Join(skillDst, "SKILL.md"),
 		},
-		"permission_mode": "default"
-	}`
+	})
 
-	// Use relative policy path - should work
-	if err := os.Chdir(policyDir); err != nil {
+	// Set process cwd to a third temp dir
+	processCwd := t.TempDir()
+	if err := os.Chdir(processCwd); err != nil {
 		t.Fatal(err)
 	}
-	defer os.Chdir(home)
+	t.Cleanup(func() { os.Chdir(origCwd) })
 
-	code, out := runHook(t, "pre-tool-use", []byte(input), "--policy", "policy.json")
+	// Set policy via env (absolute path)
+	t.Setenv("CLAUDE_PLUGIN_OPTION_POLICY", policyDst)
+
+	code, out := runHook(t, "pre-tool-use", input)
 	if code != ExitSuccess {
-		t.Fatalf("exit = %d, output:\n%s", code, out)
+		t.Fatalf("exit = %d, expected 0, output:\n%s", code, out)
+	}
+	if strings.TrimSpace(out) != "" {
+		t.Errorf("expected empty output (allowed), got: %s", out)
+	}
+
+	// Negative control: tamper one file
+	tamperedContent := "# Tampered!"
+	if err := os.WriteFile(filepath.Join(skillDst, "SKILL.md"), []byte(tamperedContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	code, out = runHook(t, "pre-tool-use", input)
+	if code != ExitSuccess {
+		t.Fatalf("exit = %d, expected 0, output:\n%s", code, out)
+	}
+
+	var result map[string]any
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatalf("output is not JSON: %v\n%s", err, out)
+	}
+
+	hookOutput := result["hookSpecificOutput"].(map[string]any)
+	if hookOutput["permissionDecision"] != "deny" {
+		t.Errorf("tampered skill should be denied, got: %v", hookOutput)
 	}
 }
 
@@ -563,14 +726,13 @@ func TestUserPromptSubmitBlocksTamperedSlashSkill(t *testing.T) {
 	policyPath := filepath.Join(home, "policy.json")
 
 	// Slash command should be blocked
-	input := `{
+	input := loadProbeFixture(t, "userpromptsubmit", map[string]any{
 		"session_id": "test-session",
-		"cwd": "/tmp",
-		"hook_event_name": "UserPromptSubmit",
-		"prompt": "/cli-test do something"
-	}`
+		"cwd":        "/tmp",
+		"prompt":     "/cli-test do something",
+	})
 
-	code, out := runHook(t, "user-prompt-submit", []byte(input), "--policy", policyPath)
+	code, out := runHook(t, "user-prompt-submit", input, "--policy", policyPath)
 	if code != ExitSuccess {
 		t.Fatalf("exit = %d, output:\n%s", code, out)
 	}
@@ -590,18 +752,25 @@ func TestUserPromptSubmitBlocksTamperedSlashSkill(t *testing.T) {
 	}
 
 	// Non-slash prompts should be ignored
-	testCases := []string{
-		`{"session_id":"test","cwd":"/tmp","hook_event_name":"UserPromptSubmit","prompt":"hello /cli-test"}`,
-		`{"session_id":"test","cwd":"/tmp","hook_event_name":"UserPromptSubmit","prompt":"/unknown-skill"}`,
+	testCases := []struct {
+		prompt string
+	}{
+		{"hello /cli-test"},
+		{"/unknown-skill"},
 	}
 
 	for _, tc := range testCases {
-		code, out := runHook(t, "user-prompt-submit", []byte(tc), "--policy", policyPath)
+		input := loadProbeFixture(t, "userpromptsubmit", map[string]any{
+			"session_id": "test",
+			"cwd":        "/tmp",
+			"prompt":     tc.prompt,
+		})
+		code, out := runHook(t, "user-prompt-submit", input, "--policy", policyPath)
 		if code != ExitSuccess {
 			t.Fatalf("exit = %d, output:\n%s", code, out)
 		}
 		if strings.TrimSpace(out) != "" {
-			t.Errorf("expected empty output for %s, got: %s", tc, out)
+			t.Errorf("expected empty output for prompt %q, got: %s", tc.prompt, out)
 		}
 	}
 }
@@ -652,13 +821,12 @@ func TestSessionStartSummary(t *testing.T) {
 
 	policyPath = policyDest
 
-	input := `{
+	input := loadProbeFixture(t, "sessionstart", map[string]any{
 		"session_id": "test-session",
-		"cwd": "/tmp",
-		"hook_event_name": "SessionStart"
-	}`
+		"cwd":        "/tmp",
+	})
 
-	exitCode, output := runHook(t, "session-start", []byte(input), "--policy", policyPath)
+	exitCode, output := runHook(t, "session-start", input, "--policy", policyPath)
 	if exitCode != ExitSuccess {
 		t.Fatalf("exit = %d, output:\n%s", exitCode, output)
 	}
