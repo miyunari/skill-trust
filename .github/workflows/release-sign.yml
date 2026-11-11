@@ -45,6 +45,9 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - name: Check plugin version matches tag
+        run: go test ./internal/claudecode -run TestPluginVersionMatchesTag -v
+
       - name: Guard trusted refs
         run: |
           set -euo pipefail

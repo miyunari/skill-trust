@@ -210,7 +210,7 @@ func TestSessionStartVersionWarning(t *testing.T) {
 		}
 
 		var response map[string]interface{}
-		if err := unmarshalJSON(result, &response); err != nil {
+		if err := json.Unmarshal(result, &response); err != nil {
 			t.Fatal(err)
 		}
 
@@ -219,7 +219,7 @@ func TestSessionStartVersionWarning(t *testing.T) {
 			t.Fatal("systemMessage not found in response")
 		}
 
-		if !contains(systemMessage, "is older than") {
+		if !strings.Contains(systemMessage, "is older than") {
 			t.Errorf("systemMessage should contain version warning, got: %q", systemMessage)
 		}
 	})
@@ -257,7 +257,7 @@ func TestSessionStartVersionWarning(t *testing.T) {
 		}
 
 		var response map[string]interface{}
-		if err := unmarshalJSON(result, &response); err != nil {
+		if err := json.Unmarshal(result, &response); err != nil {
 			t.Fatal(err)
 		}
 
@@ -266,7 +266,7 @@ func TestSessionStartVersionWarning(t *testing.T) {
 			t.Fatal("systemMessage not found in response")
 		}
 
-		if !contains(systemMessage, "is newer than") {
+		if !strings.Contains(systemMessage, "is newer than") {
 			t.Errorf("systemMessage should contain version warning, got: %q", systemMessage)
 		}
 	})
@@ -304,7 +304,7 @@ func TestSessionStartVersionWarning(t *testing.T) {
 		}
 
 		var response map[string]interface{}
-		if err := unmarshalJSON(result, &response); err != nil {
+		if err := json.Unmarshal(result, &response); err != nil {
 			t.Fatal(err)
 		}
 
@@ -313,7 +313,7 @@ func TestSessionStartVersionWarning(t *testing.T) {
 			t.Fatal("systemMessage not found in response")
 		}
 
-		if !contains(systemMessage, "is unknown") {
+		if !strings.Contains(systemMessage, "is unknown") {
 			t.Errorf("systemMessage should contain unknown version warning, got: %q", systemMessage)
 		}
 	})
@@ -351,7 +351,7 @@ func TestSessionStartVersionWarning(t *testing.T) {
 		}
 
 		var response map[string]interface{}
-		if err := unmarshalJSON(result, &response); err != nil {
+		if err := json.Unmarshal(result, &response); err != nil {
 			t.Fatal(err)
 		}
 
@@ -361,7 +361,7 @@ func TestSessionStartVersionWarning(t *testing.T) {
 		}
 
 		// Should not contain version-related warnings
-		if contains(systemMessage, "older than") || contains(systemMessage, "newer than") || contains(systemMessage, "is unknown") {
+		if strings.Contains(systemMessage, "older than") || strings.Contains(systemMessage, "newer than") || strings.Contains(systemMessage, "is unknown") {
 			t.Errorf("systemMessage should not contain version warning when versions match, got: %q", systemMessage)
 		}
 	})
@@ -384,7 +384,7 @@ func TestSessionStartVersionWarning(t *testing.T) {
 		}
 
 		var response map[string]interface{}
-		if err := unmarshalJSON(result, &response); err != nil {
+		if err := json.Unmarshal(result, &response); err != nil {
 			t.Fatal(err)
 		}
 
@@ -394,7 +394,7 @@ func TestSessionStartVersionWarning(t *testing.T) {
 		}
 
 		// Should not contain version-related warnings
-		if contains(systemMessage, "older than") || contains(systemMessage, "newer than") || contains(systemMessage, "is unknown") {
+		if strings.Contains(systemMessage, "older than") || strings.Contains(systemMessage, "newer than") || strings.Contains(systemMessage, "is unknown") {
 			t.Errorf("systemMessage should not contain version warning when PluginRoot is empty, got: %q", systemMessage)
 		}
 	})
@@ -417,7 +417,7 @@ func TestSessionStartVersionWarning(t *testing.T) {
 		}
 
 		var response map[string]interface{}
-		if err := unmarshalJSON(result, &response); err != nil {
+		if err := json.Unmarshal(result, &response); err != nil {
 			t.Fatal(err)
 		}
 
@@ -426,16 +426,8 @@ func TestSessionStartVersionWarning(t *testing.T) {
 			t.Fatal("systemMessage not found in response")
 		}
 
-		if !contains(systemMessage, "cannot read plugin version") {
+		if !strings.Contains(systemMessage, "cannot read plugin version") {
 			t.Errorf("systemMessage should contain error message for unreadable plugin.json, got: %q", systemMessage)
 		}
 	})
-}
-
-func contains(s, substr string) bool {
-	return strings.Contains(s, substr)
-}
-
-func unmarshalJSON(data []byte, v interface{}) error {
-	return json.Unmarshal(data, v)
 }
