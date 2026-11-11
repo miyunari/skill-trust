@@ -46,7 +46,17 @@ jobs:
           go-version-file: go.mod
 
       - name: Check plugin version matches tag
-        run: go test ./internal/claudecode -run TestPluginVersionMatchesTag -v
+        # Tag pushes only: dispatch dry runs on main carry the next version.
+        # SKILL_TRUST_REQUIRE_TAG_CHECK turns a missing tag environment into
+        # a failure, and the grep fails the step if the test did not run
+        # (for example after a rename, when -run matches nothing).
+        if: github.event_name == 'push'
+        env:
+          SKILL_TRUST_REQUIRE_TAG_CHECK: '1'
+        run: |
+          set -euo pipefail
+          go test ./internal/claudecode -run '^TestPluginVersionMatchesTag$' -count=1 -v | tee /tmp/plugin-version-check.log
+          grep -q '^--- PASS: TestPluginVersionMatchesTag ' /tmp/plugin-version-check.log
 
       - name: Guard trusted refs
         run: |

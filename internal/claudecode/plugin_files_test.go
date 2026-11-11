@@ -218,35 +218,41 @@ func TestPluginFiles(t *testing.T) {
 			t.Error("marketplace.json does not contain a 'skill-trust' plugin entry")
 		}
 	})
+}
 
-	// Test plugin.json version matches git tag (CI enforcement)
-	t.Run("PluginVersionMatchesTag", func(t *testing.T) {
-		refType := os.Getenv("GITHUB_REF_TYPE")
-		refName := os.Getenv("GITHUB_REF_NAME")
+// TestPluginVersionMatchesTag asserts that, on a v* tag build, plugin.json
+// carries the tag version. The release workflow runs it by exact name with
+// SKILL_TRUST_REQUIRE_TAG_CHECK=1, which turns a missing tag environment
+// into a failure instead of a skip.
+func TestPluginVersionMatchesTag(t *testing.T) {
+	pluginJSONPath := filepath.Join("..", "..", "adapters", "claude-code", ".claude-plugin", "plugin.json")
+	refType := os.Getenv("GITHUB_REF_TYPE")
+	refName := os.Getenv("GITHUB_REF_NAME")
 
-		if refType != "tag" || !strings.HasPrefix(refName, "v") {
-			t.Skip("skipping: not a tag build")
+	if refType != "tag" || !strings.HasPrefix(refName, "v") {
+		if os.Getenv("SKILL_TRUST_REQUIRE_TAG_CHECK") == "1" {
+			t.Fatalf("SKILL_TRUST_REQUIRE_TAG_CHECK=1 but not a v* tag build (GITHUB_REF_TYPE=%q, GITHUB_REF_NAME=%q)", refType, refName)
 		}
+		t.Skip("skipping: not a tag build")
+	}
 
-		// Tag should be like "v0.2.0", plugin version should be "0.2.0"
-		expectedVersion := strings.TrimPrefix(refName, "v")
+	// Tag should be like "v0.2.0", plugin version should be "0.2.0"
+	expectedVersion := strings.TrimPrefix(refName, "v")
 
-		data, err := os.ReadFile(pluginJSONPath)
-		if err != nil {
-			t.Fatalf("failed to read plugin.json: %v", err)
-		}
+	data, err := os.ReadFile(pluginJSONPath)
+	if err != nil {
+		t.Fatalf("failed to read plugin.json: %v", err)
+	}
 
-		var plugin struct {
-			Version string `json:"version"`
-		}
+	var plugin struct {
+		Version string `json:"version"`
+	}
+	if err := json.Unmarshal(data, &plugin); err != nil {
+		t.Fatalf("failed to parse plugin.json: %v", err)
+	}
 
-		if err := json.Unmarshal(data, &plugin); err != nil {
-			t.Fatalf("failed to parse plugin.json: %v", err)
-		}
-
-		if plugin.Version != expectedVersion {
-			t.Errorf("plugin.json version %q does not match tag %q (expected %q)",
-				plugin.Version, refName, expectedVersion)
-		}
-	})
+	if plugin.Version != expectedVersion {
+		t.Errorf("plugin.json version %q does not match tag %q (expected %q)",
+			plugin.Version, refName, expectedVersion)
+	}
 }
