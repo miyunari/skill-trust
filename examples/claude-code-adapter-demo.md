@@ -225,7 +225,7 @@ EOF
 $ HOME=/tmp/st-demo/home \
   CLAUDE_PLUGIN_OPTION_POLICY=/tmp/st-demo/policy.json \
   ./skill-trust hook claude-code session-start < session-start-2.json
-{"hookSpecificOutput":{"additionalContext":"The following skills are blocked and should not be used:\n  - demo-skill (ST-PREFLIGHT-VERIFIER-FAILURE)","hookEventName":"SessionStart"},"systemMessage":"skill-trust: 0 skills verified, 1 blocked(demo-skill: ST-PREFLIGHT-VERIFIER-FAILURE)"}
+{"hookSpecificOutput":{"additionalContext":"The following skills are blocked and should not be used:\n  - demo-skill (ST-PREFLIGHT-VERIFIER-FAILURE)","hookEventName":"SessionStart"},"systemMessage":"skill-trust: 0 skills verified, 1 blocked (demo-skill: ST-PREFLIGHT-VERIFIER-FAILURE)"}
 ```
 
 The new session re-verifies all skills from scratch. The tampered skill now

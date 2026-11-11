@@ -165,9 +165,11 @@ Two reference adapters implement this contract:
   commands (`skill-trust hook claude-code session-start` /
   `pre-tool-use` / `user-prompt-submit`). The hook logic lives in
   `internal/claudecode` and calls the verifier in-process (no subprocess).
-  Session state is stored in `$CLAUDE_PLUGIN_DATA/sessions/<session_id>.json`.
-  Relative paths in the policy JSON are resolved against the policy file's
-  directory (not the process cwd, as `verify` does).
+  Session state is stored in
+  `$CLAUDE_PLUGIN_DATA/sessions/state-<session_id>.json`. The policy path
+  itself should be absolute (a relative path is resolved against the hook
+  process's cwd); relative paths inside the policy JSON are resolved against
+  the policy file's directory (not the process cwd, as `verify` does).
 
 ## References
 

@@ -14,12 +14,13 @@ this repository's Go library), invoked as hook commands.
 |---------|-----------|--------|
 | Skill loading | `SessionStart` hook discovers and verifies all skills; Claude is told which are blocked | Claude sees blocked skill names but is instructed not to use them |
 | Tool execution | `PreToolUse` hook on all tools re-verifies skill roots before any tool touching a skill file runs | Tool calls touching skill files are blocked before they execute |
-| Shell execution | `PreToolUse` hook on `Bash`/`PowerShell` extracts paths from commands | Every shell command Claude spawns is checked; modified scripts are blocked before the interpreter starts |
+| Shell execution | `PreToolUse` hook on `Bash`/`PowerShell` extracts paths from commands (best-effort, see Limitations) | Commands that reference a skill file (or run from inside a skill directory) are checked; modified scripts are blocked before the interpreter starts |
 | Slash commands | `UserPromptSubmit` hook blocks `/skill-name` for blocked skills | Typing `/blocked-skill` is denied before the Skill tool runs |
 | Drift after load | Every guarded call re-verifies from scratch; session state detects digest changes | Skills modified mid-session are blocked on next use |
 
 Fail-closed is the default: unsigned skills (in strict mode), verifier failures, and stale
-digests all block. Script enforcement is path-containment based — any file
+digests all block. A missing or unreadable policy blocks every skill in both
+modes. Script enforcement is path-containment based — any file
 under a verified skill root is guarded — so it covers every helper runtime
 (Bash, Python, JavaScript, ...) without parsing per-language command syntax.
 
@@ -56,8 +57,11 @@ observed digest e08da135bf1e2d3c4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f
    ```console
    /plugin configure skill-trust
    ```
-   Set the `policy` field to the path to your trust policy JSON, for example
-   `~/trust/skills.json` or a relative path like `./policy/skills.json`.
+   Set the `policy` field to the **absolute** path of your trust policy JSON,
+   for example `/home/you/trust/skills.json`. A relative path (or `~`) is
+   resolved against the working directory of the hook process, which changes
+   with the project you open; the hook then cannot find the policy and blocks
+   every skill.
 
 ### Via local directory (development)
 
@@ -75,19 +79,29 @@ observed digest e08da135bf1e2d3c4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f
 
 3. Configure the policy path as above.
 
+For a session-only trial without installing anything, load the plugin with
+`--plugin-dir` and pass the options as environment variables (Claude Code
+hands them to the hook processes unchanged):
+
+```console
+$ CLAUDE_PLUGIN_OPTION_POLICY=/home/you/trust/skills.json \
+    claude --plugin-dir /path/to/skill-trust/adapters/claude-code
+```
+
 ## Options
 
 | Option | Default | Meaning |
 |--------|---------|---------|
-| `policy` | (required) | Path to the skill-trust policy JSON ([docs/POLICY.md](../../docs/POLICY.md)). May be absolute or relative; relative paths are resolved against the policy file's directory when loading public keys and trust roots. |
+| `policy` | (required) | Path to the skill-trust policy JSON ([docs/POLICY.md](../../docs/POLICY.md)). Use an absolute path: a relative path is resolved against the hook process's working directory. Relative paths *inside* the policy (public keys, trust roots) are resolved against the policy file's directory. If the policy is missing or malformed, every skill is blocked regardless of `strict`. |
 | `binary` | `skill-trust` | skill-trust binary path. The binary must be on `PATH` or this must be an absolute path. |
-| `strict` | `true` | Fail closed for unsigned skills: they are blocked. With `false` (report-only adoption), unsigned skills are allowed with a warning, and only previously-verified skills are guarded (they are blocked if they change). |
+| `strict` | `true` | Fail closed: every skill that does not verify (unsigned, tampered, or not satisfying the policy) is blocked. With `false` (report-only adoption), any skill that does not verify is allowed with a warning, and only skills that verified earlier in the session are guarded (they are blocked if they change). A missing or malformed policy still blocks every skill. |
 
 ## Decision table
 
 Every guarded call runs full verification of the skill root. With `R` = the
 session-state record for the root (stored in
-`$CLAUDE_PLUGIN_DATA/sessions/<session_id>.json`):
+`$CLAUDE_PLUGIN_DATA/sessions/state-<session_id>.json`, with unsafe characters
+in the session id replaced):
 
 | Verification now | Record `R` | strict=true | strict=false |
 |---|---|---|---|
@@ -106,16 +120,29 @@ blocked earlier but now verifies is admitted and recorded (self-healing).
 Removing `.skill-trust/` from a skill that verified earlier is a
 change-after-verify block in both modes.
 
+If the verifier cannot be built (policy missing, unreadable, or malformed, or
+its trust material unavailable), every skill is blocked with
+`ST-PREFLIGHT-VERIFIER-FAILURE` in both modes; report-only never turns a
+broken policy into an allow.
+
 ## How guarding works
 
 1. **SessionStart** (on startup, `/clear`, resume, compact): discover all skill
    roots from standard locations (see "Skill locations"), verify each, record
    allowed digests in session state, report summary to the user and blocked
    skills to Claude. Check CLI/plugin version lockstep and warn on mismatch.
+   The summary reads `skill-trust: N skills verified, M blocked (name: CODE, ...)`;
+   in report-only mode, skills allowed despite not verifying are counted
+   separately: `skill-trust: N skills verified, M blocked, K unverified (report-only)`.
 2. **PreToolUse** (before every tool executes): extract candidate paths from
    `tool_input` (explicit path fields like `file_path`/`path`/`cwd`/`directory`,
    tokens from `Bash`/`PowerShell` commands that look like paths, the hook's
-   `cwd`). For the `Skill` tool, resolve `skill` name to root(s). Find skill
+   `cwd`; a leading `~/` or `$HOME/` is expanded). For the `Skill` tool,
+   resolve the `skill` name to root(s): exact name matches, otherwise every
+   skill with the same name after the last `:`; directory-scoped names such as
+   `apps/web:deploy` are also looked up under
+   `<cwd>/apps/web/.claude/skills/deploy` and
+   `$CLAUDE_PROJECT_DIR/apps/web/.claude/skills/deploy`. Find skill
    roots containing each candidate (longest discovered root first, then
    ancestry walk for `SKILL.md` in valid locations). For every distinct root,
    re-verify; block if unsigned (strict mode), if verification fails, or if
@@ -130,7 +157,7 @@ change-after-verify block in both modes.
 - Shell command path extraction is best-effort: paths referenced only through
   shell variables, or relative to a `cd` inside the command, cannot be
   attributed statically. Explicit tool path inputs and commands referencing
-  skill files directly are always covered, and guarding the working directory
+  skill files directly by path are covered, and guarding the working directory
   catches helpers run from inside a skill directory.
 - Only paths **inside** a skill root trigger verification. A tool call on a
   parent directory (`Grep` with `path: ~/.claude`, `cat ~/.claude/skills/*/SKILL.md`)
@@ -199,9 +226,10 @@ the repository's `e2e-sign` workflow for a complete live example).
   blocks prompts starting with `/<blocked-skill>`. Slash commands do **not** go
   through the `Skill` tool, so `PreToolUse` alone would not catch them.
 - **Shell path extraction is best-effort.** Paths referenced only through shell
-  variables (`$HELPER`), or relative to a `cd` inside a command, cannot be
+  variables other than a leading `$HOME` (`$HELPER`), globs, or relative to a
+  `cd` inside a command, cannot be
   attributed statically. Explicit tool path inputs and commands referencing
-  skill files directly are always covered, and guarding the working directory
+  skill files directly by path are covered, and guarding the working directory
   catches helpers run from inside a skill directory.
 - **Only paths inside a skill root trigger verification.** A tool call on a
   parent directory (`Grep` with `path: ~/.claude`, `cat ~/.claude/skills/*/SKILL.md`)
@@ -213,9 +241,20 @@ the repository's `e2e-sign` workflow for a complete live example).
 - **PreToolUse denies are honored even in bypass-permissions mode.** A blocked
   skill is denied regardless of the permission mode (verified with Claude Code
   2.1.322).
-- **Disabling the plugin disables enforcement.** Removing the binary from
-  `PATH`, editing hook settings, or uninstalling the plugin disables
-  enforcement. Hook timeouts are set to block on failure (`onFailure: "block"`).
+- **Skills the adapter cannot find are allowed.** A `Skill` tool name or
+  `/name` prompt that resolves to no directory is allowed, because built-in and
+  bundled skills have no files on disk to verify. A skill in a location the
+  adapter does not discover (for example, a plugin that declares custom skill
+  paths instead of `skills/`) falls into this case and is not verified.
+- **A missing binary blocks everything; disabling the plugin disables
+  enforcement.** The `PreToolUse` and `UserPromptSubmit` hooks set
+  `"onFailure": "block"`. With Claude Code 2.1.322 (session-only
+  `--plugin-dir` test), when the `skill-trust` binary was not on `PATH`, every
+  prompt and every tool call was blocked with
+  `failed; blocking because onFailure is "block"`; the `SessionStart` hook
+  failed without blocking. A hook timeout should be blocking under the same
+  setting, but that case was not tested. Disabling or uninstalling the plugin, or editing hook settings,
+  removes enforcement entirely.
 
 A complete walkthrough — session start with allow, tampered script, deny, slash
 command block, new session summary — is in
