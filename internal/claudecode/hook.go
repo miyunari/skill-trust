@@ -35,13 +35,50 @@ type Config struct {
 	Stderr      io.Writer                                           // Where to write SaveState errors (nil = discard)
 }
 
-// policyErrorVerifier wraps an error and returns it from VerifySkill.
-type policyErrorVerifier struct {
-	err error
+// verifierFailureOutcomes denies every root when the verifier cannot be
+// constructed (missing or malformed policy, unavailable trust material).
+// This is independent of strict mode: report-only allows skills that fail
+// verification, but without a verifier nothing was verified at all, and the
+// adapter never fails open on error. State is left untouched.
+func verifierFailureOutcomes(roots []string, err error) decideOutcomes {
+	var blocked []Outcome
+	for _, root := range roots {
+		blocked = append(blocked, Outcome{
+			Root:    root,
+			Allowed: false,
+			Block: &preflight.BlockError{
+				Code:    preflight.CodeVerifierFailure,
+				Message: fmt.Sprintf("skill %s blocked: verifier unavailable: %v", root, err),
+			},
+		})
+	}
+	return decideOutcomes{blocked: blocked}
 }
 
-func (e policyErrorVerifier) VerifySkill(root string) (preflight.Result, error) {
-	return preflight.Result{}, e.err
+// newVerifier constructs the verifier for cfg, treating an empty policy
+// path or a nil constructor as an error.
+func newVerifier(cfg Config) (preflight.Verifier, error) {
+	if cfg.Policy == "" {
+		return nil, fmt.Errorf("policy not configured")
+	}
+	if cfg.NewVerifier == nil {
+		return nil, fmt.Errorf("no verifier constructor configured")
+	}
+	v, err := cfg.NewVerifier(cfg.Policy)
+	if err == nil && v == nil {
+		err = fmt.Errorf("verifier constructor returned no verifier")
+	}
+	return v, err
+}
+
+// decideOrDeny constructs the verifier and decides roots, or denies all of
+// them if the verifier cannot be constructed.
+func decideOrDeny(cfg Config, roots []string, sessionID string) decideOutcomes {
+	verifier, err := newVerifier(cfg)
+	if err != nil {
+		return verifierFailureOutcomes(roots, err)
+	}
+	return decideRoots(cfg, roots, sessionID, verifier)
 }
 
 // decideOutcomes holds the results of deciding multiple roots.
@@ -94,7 +131,7 @@ func decideRoots(cfg Config, roots []string, sessionID string, verifier prefligh
 // with no output, or JSON for denied/warning outcomes.
 func PreToolUse(cfg Config, in HookInput) []byte {
 	// Extract candidate paths from tool input
-	candidates := CandidatePaths(in.ToolInput, in.Cwd)
+	candidates := CandidatePaths(in.ToolInput, in.Cwd, cfg.Locations.Home)
 
 	// Discover all skills
 	discovered := cfg.Locations.Discover()
@@ -103,10 +140,7 @@ func PreToolUse(cfg Config, in HookInput) []byte {
 	if in.ToolName == "Skill" {
 		if m, ok := in.ToolInput.(map[string]any); ok {
 			if skillName, ok := m["skill"].(string); ok && skillName != "" {
-				roots := ResolveSkillNames(skillName, discovered)
-				for _, root := range roots {
-					candidates = append(candidates, root)
-				}
+				candidates = append(candidates, cfg.Locations.ResolveSkill(skillName, discovered)...)
 			}
 		}
 	}
@@ -126,13 +160,8 @@ func PreToolUse(cfg Config, in HookInput) []byte {
 		return nil
 	}
 
-	// Construct verifier lazily - errors become an erroring verifier
-	verifier, err := cfg.NewVerifier(cfg.Policy)
-	if err != nil {
-		verifier = policyErrorVerifier{err}
-	}
-
-	outcomes := decideRoots(cfg, skillRoots, in.SessionID, verifier)
+	// Construct verifier lazily; failure denies every skill root
+	outcomes := decideOrDeny(cfg, skillRoots, in.SessionID)
 
 	// If any blocked, return deny
 	if len(outcomes.blocked) > 0 {
@@ -171,19 +200,14 @@ func UserPromptSubmit(cfg Config, in HookInput) []byte {
 	discovered := cfg.Locations.Discover()
 
 	// Resolve skill name to roots
-	roots := ResolveSkillNames(skillName, discovered)
+	roots := cfg.Locations.ResolveSkill(skillName, discovered)
 	if len(roots) == 0 {
 		// Unknown skill - allow
 		return nil
 	}
 
-	// Construct verifier lazily - errors become an erroring verifier
-	verifier, err := cfg.NewVerifier(cfg.Policy)
-	if err != nil {
-		verifier = policyErrorVerifier{err}
-	}
-
-	outcomes := decideRoots(cfg, roots, in.SessionID, verifier)
+	// Construct verifier lazily; failure denies every skill root
+	outcomes := decideOrDeny(cfg, roots, in.SessionID)
 
 	// If any blocked, return block
 	if len(outcomes.blocked) > 0 {
@@ -217,26 +241,19 @@ func SessionStart(cfg Config, in HookInput) []byte {
 	// Discover all skills
 	discovered := cfg.Locations.Discover()
 
-	// Construct verifier (even if policy missing or no skills, to get consistent error handling)
-	var verifier preflight.Verifier
-	var verifierErr error
-	if cfg.Policy != "" {
-		verifier, verifierErr = cfg.NewVerifier(cfg.Policy)
-		if verifierErr != nil {
-			verifier = policyErrorVerifier{verifierErr}
-		}
-	} else {
-		verifier = policyErrorVerifier{fmt.Errorf("policy not configured")}
-		verifierErr = fmt.Errorf("policy not configured")
-	}
+	// Construct verifier. If it cannot be built, every skill is reported
+	// blocked, matching what PreToolUse and UserPromptSubmit will do.
+	verifier, verifierErr := newVerifier(cfg)
 
 	now := time.Now()
 	if cfg.Now != nil {
 		now = cfg.Now()
 	}
 
-	// Verify all discovered skills (fresh baseline, no previous state)
-	var allowed []Skill
+	// Verify all discovered skills (fresh baseline, no previous state).
+	// verified: allowed without warning; unverified: allowed with a
+	// report-only warning; blocked: denied.
+	var verified, unverified int
 	var blocked []struct {
 		Skill
 		Code string
@@ -245,11 +262,22 @@ func SessionStart(cfg Config, in HookInput) []byte {
 	newState := make(State)
 
 	for _, skill := range discovered {
+		if verifierErr != nil {
+			blocked = append(blocked, struct {
+				Skill
+				Code string
+			}{skill, string(preflight.CodeVerifierFailure)})
+			continue
+		}
+
 		outcome, newRec := Decide(verifier, skill.Root, nil, cfg.Strict, now)
 
-		if outcome.Allowed {
-			allowed = append(allowed, skill)
-		} else if outcome.Block != nil {
+		switch {
+		case outcome.Allowed && outcome.Warning != "":
+			unverified++
+		case outcome.Allowed:
+			verified++
+		case outcome.Block != nil:
 			blocked = append(blocked, struct {
 				Skill
 				Code string
@@ -267,17 +295,22 @@ func SessionStart(cfg Config, in HookInput) []byte {
 		fmt.Fprintf(cfg.Stderr, "skill-trust: saving state: %v\n", err)
 	}
 
-	// Build system message (always use N skills verified, M blocked format)
+	// Build system message: "N skills verified, M blocked", plus
+	// "K unverified (report-only)" when report-only allowed K skills that
+	// did not verify.
 	var msgParts []string
 	msgParts = append(msgParts, fmt.Sprintf("skill-trust: %d skills verified, %d blocked",
-		len(allowed), len(blocked)))
+		verified, len(blocked)))
+	if unverified > 0 {
+		msgParts = append(msgParts, fmt.Sprintf(", %d unverified (report-only)", unverified))
+	}
 
 	if len(blocked) > 0 {
 		var names []string
 		for _, b := range blocked {
 			names = append(names, fmt.Sprintf("%s: %s", b.Name, b.Code))
 		}
-		msgParts = append(msgParts, fmt.Sprintf("(%s)", strings.Join(names, ", ")))
+		msgParts = append(msgParts, fmt.Sprintf(" (%s)", strings.Join(names, ", ")))
 	}
 
 	// Add version warning if CLI and plugin versions differ
@@ -285,8 +318,8 @@ func SessionStart(cfg Config, in HookInput) []byte {
 		msgParts = append(msgParts, "; "+warning)
 	}
 
-	if cfg.Policy == "" {
-		msgParts = append(msgParts, "; policy not configured")
+	if verifierErr != nil {
+		msgParts = append(msgParts, fmt.Sprintf("; %v", verifierErr))
 	}
 
 	systemMessage := strings.Join(msgParts, "")

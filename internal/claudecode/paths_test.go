@@ -138,7 +138,7 @@ func TestCommandPaths(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := CommandPaths(tt.command, tt.cwd)
+			got := CommandPaths(tt.command, tt.cwd, "")
 			if !reflect.DeepEqual(got, tt.expected) {
 				t.Errorf("CommandPaths(%q, %q) = %v, want %v", tt.command, tt.cwd, got, tt.expected)
 			}
@@ -153,7 +153,7 @@ func TestCandidatePaths(t *testing.T) {
 			"command": "bash scripts/run.sh",
 			"timeout": 5,
 		}
-		got := CandidatePaths(input, "/proj")
+		got := CandidatePaths(input, "/proj", "")
 		// Should contain these paths (order doesn't matter, cwd always included)
 		hasATS := false
 		hasRunSh := false
@@ -180,7 +180,7 @@ func TestCandidatePaths(t *testing.T) {
 			"workdir":   "/w",
 			"directory": "d",
 		}
-		got := CandidatePaths(input, "/proj")
+		got := CandidatePaths(input, "/proj", "")
 		// Should be normalized and deduplicated
 		hasA := false
 		hasW := false
@@ -207,7 +207,7 @@ func TestCandidatePaths(t *testing.T) {
 			"command": nil,
 			"other":   "",
 		}
-		got := CandidatePaths(input, "/proj")
+		got := CandidatePaths(input, "/proj", "")
 		if len(got) != 1 || got[0] != "/proj" {
 			t.Errorf("got %v, want [/proj]", got)
 		}
@@ -222,7 +222,7 @@ func TestCandidatePaths(t *testing.T) {
 				map[string]any{"command": "bash scripts/x.sh"},
 			},
 		}
-		got := CandidatePaths(input, "/root")
+		got := CandidatePaths(input, "/root", "")
 		hasNested := false
 		hasScript := false
 		for _, p := range got {
@@ -244,7 +244,7 @@ func TestCandidatePaths(t *testing.T) {
 		input := map[string]any{
 			"file_path": filepath.Join(root, "scripts/new.sh"),
 		}
-		got := CandidatePaths(input, root)
+		got := CandidatePaths(input, root, "")
 		expected := filepath.Join(realRoot, "scripts", "new.sh")
 		hasExpected := false
 		for _, p := range got {
@@ -259,14 +259,44 @@ func TestCandidatePaths(t *testing.T) {
 	})
 
 	t.Run("NonObjectInput", func(t *testing.T) {
-		got := CandidatePaths("str", "/cwd")
+		got := CandidatePaths("str", "/cwd", "")
 		if len(got) != 1 || got[0] != "/cwd" {
 			t.Errorf("got %v, want [/cwd]", got)
 		}
 
-		got = CandidatePaths(nil, "/cwd")
+		got = CandidatePaths(nil, "/cwd", "")
 		if len(got) != 1 || got[0] != "/cwd" {
 			t.Errorf("got %v, want [/cwd]", got)
 		}
 	})
+}
+
+func TestCommandPathsExpandsHome(t *testing.T) {
+	home := "/home/u"
+	for _, tc := range []struct{ command, want string }{
+		{"cat ~/.claude/skills/x/SKILL.md", "/home/u/.claude/skills/x/SKILL.md"},
+		{"cat $HOME/.claude/skills/x/SKILL.md", "/home/u/.claude/skills/x/SKILL.md"},
+		{`cat "${HOME}/.claude/skills/x/SKILL.md"`, "/home/u/.claude/skills/x/SKILL.md"},
+		{"ls ~", "/home/u"},
+	} {
+		got := CommandPaths(tc.command, "/proj", home)
+		if len(got) != 1 || got[0] != tc.want {
+			t.Errorf("CommandPaths(%q) = %v, want [%s]", tc.command, got, tc.want)
+		}
+	}
+	// "~user/..." is not expanded; it is a relative-looking token.
+	if got := CommandPaths("cat ~other/x", "/proj", home); len(got) != 1 || got[0] != "/proj/~other/x" {
+		t.Errorf("CommandPaths(~other/x) = %v", got)
+	}
+	// Tool path keys expand too.
+	got := CandidatePaths(map[string]any{"file_path": "~/.claude/skills/x/SKILL.md"}, "/proj", home)
+	found := false
+	for _, p := range got {
+		if p == NormalizePath("/home/u/.claude/skills/x/SKILL.md") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("CandidatePaths did not expand ~ in file_path: %v", got)
+	}
 }

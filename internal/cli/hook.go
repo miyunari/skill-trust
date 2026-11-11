@@ -37,7 +37,7 @@ var sessionStartCmd = &cobra.Command{
 	Use:   "session-start",
 	Short: "Handle SessionStart hook event",
 	Run: func(cmd *cobra.Command, args []string) {
-		runHookEvent(cmd)
+		runHookEvent(cmd, "SessionStart")
 	},
 }
 
@@ -45,7 +45,7 @@ var preToolUseCmd = &cobra.Command{
 	Use:   "pre-tool-use",
 	Short: "Handle PreToolUse hook event",
 	Run: func(cmd *cobra.Command, args []string) {
-		runHookEvent(cmd)
+		runHookEvent(cmd, "PreToolUse")
 	},
 }
 
@@ -53,7 +53,7 @@ var userPromptSubmitCmd = &cobra.Command{
 	Use:   "user-prompt-submit",
 	Short: "Handle UserPromptSubmit hook event",
 	Run: func(cmd *cobra.Command, args []string) {
-		runHookEvent(cmd)
+		runHookEvent(cmd, "UserPromptSubmit")
 	},
 }
 
@@ -84,10 +84,26 @@ func getStrictDefault() bool {
 	return strict
 }
 
-func runHookEvent(cmd *cobra.Command) {
+// runHookEvent handles one hook invocation. The event is fixed by the
+// subcommand, never by stdin: hook_event_name may be absent, but if present
+// it must agree. Unparseable or non-object input and a mismatched event are
+// blocking errors (exit 2, message on stderr).
+func runHookEvent(cmd *cobra.Command, event string) {
 	input, err := io.ReadAll(cmd.InOrStdin())
 	if err != nil {
 		fmt.Fprintf(cmd.ErrOrStderr(), "skill-trust: reading stdin: %v\n", err)
+		exitCode = ExitError
+		return
+	}
+
+	// Require a JSON object; "null", arrays, strings and numbers are
+	// rejected (json.Unmarshal of "null" into a struct would succeed).
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(input, &raw); err != nil || raw == nil {
+		if err == nil {
+			err = fmt.Errorf("expected a JSON object")
+		}
+		fmt.Fprintf(cmd.ErrOrStderr(), "skill-trust: invalid JSON input: %v\n", err)
 		exitCode = ExitError
 		return
 	}
@@ -99,10 +115,18 @@ func runHookEvent(cmd *cobra.Command) {
 		return
 	}
 
+	if hookInput.HookEventName != "" && hookInput.HookEventName != event {
+		fmt.Fprintf(cmd.ErrOrStderr(), "skill-trust: hook_event_name %q does not match subcommand event %q\n",
+			hookInput.HookEventName, event)
+		exitCode = ExitError
+		return
+	}
+	hookInput.HookEventName = event
+
 	cfg := buildConfig(hookInput.Cwd, cmd.ErrOrStderr())
 
 	var result []byte
-	switch hookInput.HookEventName {
+	switch event {
 	case "SessionStart":
 		result = claudecode.SessionStart(cfg, hookInput)
 	case "PreToolUse":

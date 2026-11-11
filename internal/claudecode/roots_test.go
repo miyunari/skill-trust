@@ -295,4 +295,50 @@ func TestResolveSkillNames(t *testing.T) {
 			t.Errorf("ResolveSkillNames(deploy) = %v, want both home and project", roots)
 		}
 	})
+
+	// Ambiguous suffix match: every candidate is returned, not none.
+	t.Run("SuffixMatchAmbiguous", func(t *testing.T) {
+		ambiguous := []Skill{
+			{Name: "a:deploy", Root: "/plugins/a/skills/deploy"},
+			{Name: "b:deploy", Root: "/plugins/b/skills/deploy"},
+		}
+		roots := ResolveSkillNames("deploy", ambiguous)
+		if len(roots) != 2 {
+			t.Errorf("ResolveSkillNames(deploy) ambiguous = %v, want both roots", roots)
+		}
+	})
+}
+
+func TestResolveSkillDirectoryScoped(t *testing.T) {
+	base := t.TempDir()
+	project := filepath.Join(base, "project")
+	nested := filepath.Join(project, "apps", "web", ".claude", "skills", "deploy")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(nested, "SKILL.md"), []byte("# x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// A scoped directory without SKILL.md is not a skill.
+	if err := os.MkdirAll(filepath.Join(project, "apps", "api", ".claude", "skills", "deploy"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	other := []Skill{{Name: "deploy", Root: "/elsewhere/.claude/skills/deploy"}}
+	want := NormalizePath(nested)
+
+	for _, l := range []Locations{{Cwd: project}, {Cwd: "/nonexistent", ProjectDir: project}} {
+		got := l.ResolveSkill("apps/web:deploy", other)
+		if len(got) != 1 || got[0] != want {
+			t.Errorf("ResolveSkill(apps/web:deploy) with %+v = %v, want [%s]", l, got, want)
+		}
+	}
+
+	l := Locations{Cwd: project}
+	for _, name := range []string{"apps/api:deploy", "../project/apps/web:deploy", "apps/../apps/web:deploy", project + "/apps/web:deploy", "apps/web:../deploy"} {
+		for _, r := range l.ResolveSkill(name, nil) {
+			if r == want {
+				t.Errorf("ResolveSkill(%q) must not resolve the scoped directory, got %v", name, r)
+			}
+		}
+	}
 }

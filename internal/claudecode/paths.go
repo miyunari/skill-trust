@@ -54,10 +54,31 @@ func NormalizePath(p string) string {
 	}
 }
 
+// expandHome expands a leading "~", "~/", "$HOME/" or "${HOME}/" to home.
+// It returns the token unchanged when home is empty or there is no such
+// prefix ("~user/..." is not expanded).
+func expandHome(token, home string) string {
+	if home == "" {
+		return token
+	}
+	switch {
+	case token == "~" || token == "$HOME" || token == "${HOME}":
+		return home
+	case strings.HasPrefix(token, "~/"):
+		return filepath.Join(home, token[2:])
+	case strings.HasPrefix(token, "$HOME/"):
+		return filepath.Join(home, token[len("$HOME/"):])
+	case strings.HasPrefix(token, "${HOME}/"):
+		return filepath.Join(home, token[len("${HOME}/"):])
+	}
+	return token
+}
+
 // CommandPaths extracts candidate file paths from a shell command string.
 // Best-effort and deliberately conservative: quoted or bare tokens that
-// contain a path separator are resolved against cwd.
-func CommandPaths(command, cwd string) []string {
+// contain a path separator are resolved against cwd, after expanding a
+// leading "~", "~/", "$HOME/" or "${HOME}/" to home.
+func CommandPaths(command, cwd, home string) []string {
 	// Token regex matching the TypeScript version
 	tokenRegex := regexp.MustCompile(`(?:[^\s"'` + "`" + `]+|"[^"]*"|'[^']*')+`)
 	tokens := tokenRegex.FindAllString(command, -1)
@@ -69,6 +90,15 @@ func CommandPaths(command, cwd string) []string {
 
 		// Strip trailing comma/semicolon
 		token = strings.TrimRight(token, ",;")
+
+		// Expand home before the variable/separator filters
+		if token == "~" || token == "$HOME" || token == "${HOME}" {
+			if home != "" {
+				out = append(out, home)
+			}
+			continue
+		}
+		token = expandHome(token, home)
 
 		// Skip empty, flags, variables
 		if token == "" || strings.HasPrefix(token, "-") || strings.HasPrefix(token, "$") {
@@ -129,8 +159,8 @@ var commandKeys = map[string]bool{
 
 // CandidatePaths recursively extracts candidate filesystem paths from tool
 // input. Returns normalized, deduplicated paths. Non-map/non-slice input
-// returns just [cwd].
-func CandidatePaths(toolInput any, cwd string) []string {
+// returns just [cwd]. A leading "~" or "$HOME" is expanded to home.
+func CandidatePaths(toolInput any, cwd, home string) []string {
 	seen := make(map[string]bool)
 	var collect func(any)
 
@@ -140,13 +170,13 @@ func CandidatePaths(toolInput any, cwd string) []string {
 			for key, val := range v {
 				if s, ok := val.(string); ok && s != "" {
 					if pathKeys[key] {
-						resolved := s
-						if !filepath.IsAbs(s) {
-							resolved = filepath.Join(cwd, s)
+						resolved := expandHome(s, home)
+						if !filepath.IsAbs(resolved) {
+							resolved = filepath.Join(cwd, resolved)
 						}
 						seen[NormalizePath(resolved)] = true
 					} else if commandKeys[key] {
-						for _, p := range CommandPaths(s, cwd) {
+						for _, p := range CommandPaths(s, cwd, home) {
 							seen[NormalizePath(p)] = true
 						}
 					}

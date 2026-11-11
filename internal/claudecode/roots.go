@@ -239,9 +239,9 @@ func (l Locations) RootOf(path string, discovered []Skill) (string, bool) {
 }
 
 // ResolveSkillNames resolves a skill name to all matching roots. Returns
-// every root whose Name matches exactly; if none, the unique root whose
-// name's segment after the last ':' equals name's segment after its last ':'
-// (only if exactly one); else nil.
+// every root whose Name matches exactly; if none, every root whose name's
+// segment after the last ':' equals name's segment after its last ':'. An
+// ambiguous name therefore checks all candidates instead of none.
 func ResolveSkillNames(name string, discovered []Skill) []string {
 	// Exact matches first
 	var exactMatches []string
@@ -271,9 +271,84 @@ func ResolveSkillNames(name string, discovered []Skill) []string {
 		}
 	}
 
-	if len(matches) == 1 {
-		return matches
+	return matches
+}
+
+// ResolveSkill resolves a Skill tool or slash-command name to skill roots.
+// In addition to ResolveSkillNames over discovered skills, a
+// directory-scoped name "<prefix>:<skill>" whose prefix contains '/' (for
+// example "apps/web:deploy") is looked up as
+// <cwd>/<prefix>/.claude/skills/<skill> and
+// $CLAUDE_PROJECT_DIR/<prefix>/.claude/skills/<skill>; those directories
+// are not found by discovery, which only walks up from cwd. When a scoped
+// directory exists it is returned together with exact name matches, and
+// suffix matching is not used.
+func (l Locations) ResolveSkill(name string, discovered []Skill) []string {
+	scoped := l.scopedSkillRoots(name)
+	if len(scoped) == 0 {
+		return ResolveSkillNames(name, discovered)
 	}
 
-	return nil
+	seen := make(map[string]bool)
+	var out []string
+	add := func(root string) {
+		if !seen[root] {
+			seen[root] = true
+			out = append(out, root)
+		}
+	}
+	for _, root := range scoped {
+		add(root)
+	}
+	for _, s := range discovered {
+		if s.Name == name {
+			add(s.Root)
+		}
+	}
+	return out
+}
+
+// scopedSkillRoots returns the existing skill roots for a directory-scoped
+// name, or nil if the name is not directory-scoped or is unsafe (absolute
+// prefix, ".." components, path separators in the skill segment).
+func (l Locations) scopedSkillRoots(name string) []string {
+	idx := strings.LastIndex(name, ":")
+	if idx <= 0 {
+		return nil
+	}
+	prefix, skill := name[:idx], name[idx+1:]
+	if !strings.Contains(prefix, "/") || skill == "" || skill == "." || skill == ".." ||
+		strings.ContainsAny(skill, `/\`) {
+		return nil
+	}
+	if strings.HasPrefix(prefix, "/") || filepath.IsAbs(prefix) || filepath.VolumeName(prefix) != "" {
+		return nil
+	}
+	for _, part := range strings.Split(strings.ReplaceAll(prefix, `\`, "/"), "/") {
+		if part == ".." {
+			return nil
+		}
+	}
+
+	var out []string
+	seen := make(map[string]bool)
+	for _, base := range []string{l.Cwd, l.ProjectDir} {
+		if base == "" {
+			continue
+		}
+		root := filepath.Join(base, filepath.FromSlash(prefix), ".claude", "skills", skill)
+		info, err := os.Stat(root)
+		if err != nil || !info.IsDir() {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(root, "SKILL.md")); err != nil {
+			continue
+		}
+		normalized := NormalizePath(root)
+		if !seen[normalized] {
+			seen[normalized] = true
+			out = append(out, normalized)
+		}
+	}
+	return out
 }

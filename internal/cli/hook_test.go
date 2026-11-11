@@ -466,6 +466,15 @@ func TestPreToolUseChangedAfterVerifyIsSticky(t *testing.T) {
 		t.Errorf("expected ST-PREFLIGHT-CHANGED-AFTER-VERIFY after valid re-sign, got: %s", reason)
 	}
 
+	// The deny is sticky: retrying in the same session is still denied.
+	code, out = runHook(t, "pre-tool-use", []byte(input), "--policy", policyDest)
+	if code != ExitSuccess {
+		t.Fatalf("second pre-tool-use exit = %d, output:\n%s", code, out)
+	}
+	if reason := requireDeny(t, out); !strings.Contains(reason, "ST-PREFLIGHT-CHANGED-AFTER-VERIFY") {
+		t.Errorf("retry should still be ST-PREFLIGHT-CHANGED-AFTER-VERIFY, got: %s", reason)
+	}
+
 	// New session should clear the sticky state
 	code, out = runHook(t, "session-start", []byte(sessionInput), "--policy", policyDest)
 	if code != ExitSuccess {
@@ -591,6 +600,44 @@ func TestPreToolUseMissingPolicy(t *testing.T) {
 	hookOutput := result["hookSpecificOutput"].(map[string]any)
 	if hookOutput["permissionDecision"] != "deny" {
 		t.Errorf("missing policy should deny in strict mode, got: %v", hookOutput)
+	}
+
+	// Report-only mode must not turn a missing or malformed policy into an
+	// allow: the verifier cannot be built, so every skill root is denied.
+	malformed := filepath.Join(home, "malformed-policy.json")
+	if err := os.WriteFile(malformed, []byte("{not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, policy := range []string{"/nonexistent/policy.json", malformed} {
+		code, out = runHook(t, "pre-tool-use", []byte(input), "--policy", policy, "--strict=false")
+		if code != ExitSuccess {
+			t.Fatalf("policy %s strict=false: exit = %d, output:\n%s", policy, code, out)
+		}
+		reason := requireDeny(t, out)
+		if !strings.Contains(reason, "[ST-PREFLIGHT-VERIFIER-FAILURE]") || !strings.Contains(reason, "root: ") {
+			t.Errorf("policy %s strict=false: reason should carry verifier-failure code and root, got: %s", policy, reason)
+		}
+	}
+}
+
+func TestUserPromptSubmitMissingPolicy(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CLAUDE_PLUGIN_DATA", filepath.Join(home, ".claude"))
+	t.Setenv("CLAUDE_PROJECT_DIR", "")
+
+	setupHookTest(t, home, "cli-test", false)
+
+	input := `{"session_id":"s","cwd":"/tmp","hook_event_name":"UserPromptSubmit","prompt":"/cli-test go"}`
+	for _, strict := range []string{"--strict=true", "--strict=false"} {
+		code, out := runHook(t, "user-prompt-submit", []byte(input), "--policy", "/nonexistent/policy.json", strict)
+		if code != ExitSuccess {
+			t.Fatalf("%s: exit = %d, output:\n%s", strict, code, out)
+		}
+		reason := requireBlockPrompt(t, out)
+		if !strings.Contains(reason, "[ST-PREFLIGHT-VERIFIER-FAILURE]") || !strings.Contains(reason, "root: ") {
+			t.Errorf("%s: reason should carry verifier-failure code and root, got: %s", strict, reason)
+		}
 	}
 }
 
@@ -1063,5 +1110,235 @@ func TestPreToolUseSymlinkedSkillTampered(t *testing.T) {
 	hookOutput = result["hookSpecificOutput"].(map[string]any)
 	if hookOutput["permissionDecision"] != "deny" {
 		t.Errorf("real path should also deny, got: %v", hookOutput)
+	}
+}
+
+// requireDeny asserts that out is a PreToolUse deny and returns its reason.
+func requireDeny(t *testing.T, out string) string {
+	t.Helper()
+	var result struct {
+		HookSpecificOutput struct {
+			PermissionDecision       string `json:"permissionDecision"`
+			PermissionDecisionReason string `json:"permissionDecisionReason"`
+		} `json:"hookSpecificOutput"`
+	}
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatalf("expected deny JSON, got %q: %v", out, err)
+	}
+	if result.HookSpecificOutput.PermissionDecision != "deny" {
+		t.Fatalf("expected deny, got: %s", out)
+	}
+	return result.HookSpecificOutput.PermissionDecisionReason
+}
+
+// requireBlockPrompt asserts that out is a UserPromptSubmit block and
+// returns its reason.
+func requireBlockPrompt(t *testing.T, out string) string {
+	t.Helper()
+	var result struct {
+		Decision string `json:"decision"`
+		Reason   string `json:"reason"`
+	}
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatalf("expected block JSON, got %q: %v", out, err)
+	}
+	if result.Decision != "block" {
+		t.Fatalf("expected block, got: %s", out)
+	}
+	return result.Reason
+}
+
+// writeUnsignedSkill creates <dir>/SKILL.md (an unsigned skill root).
+func writeUnsignedSkill(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte("# Unsigned\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// isolatedHookEnv points HOME, plugin data and project dir at a temp home
+// and returns it with a valid (fixtures key) policy path.
+func isolatedHookEnv(t *testing.T) (home, policy string) {
+	t.Helper()
+	home = t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CLAUDE_PLUGIN_DATA", filepath.Join(home, ".plugin-data"))
+	t.Setenv("CLAUDE_PROJECT_DIR", "")
+	_, pubPath := newKey(t)
+	return home, keyPolicy(t, pubPath)
+}
+
+func TestAmbiguousSkillNameChecksEveryMatch(t *testing.T) {
+	home, policy := isolatedHookEnv(t)
+
+	// Two plugins each ship an unsigned "deploy" skill.
+	installs := map[string]any{}
+	for _, plugin := range []string{"a", "b"} {
+		installPath := filepath.Join(home, "plugin-installs", plugin)
+		writeUnsignedSkill(t, filepath.Join(installPath, "skills", "deploy"))
+		installs[plugin+"@market"] = []map[string]string{{"installPath": installPath}}
+	}
+	data, _ := json.Marshal(map[string]any{"version": 2, "plugins": installs})
+	pluginsDir := filepath.Join(home, ".claude", "plugins")
+	if err := os.MkdirAll(pluginsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pluginsDir, "installed_plugins.json"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	skill := `{"session_id":"s","cwd":"/tmp","hook_event_name":"PreToolUse","tool_name":"Skill","tool_input":{"skill":"deploy"}}`
+	code, out := runHook(t, "pre-tool-use", []byte(skill), "--policy", policy)
+	if code != ExitSuccess {
+		t.Fatalf("exit = %d, output:\n%s", code, out)
+	}
+	requireDeny(t, out)
+
+	prompt := `{"session_id":"s","cwd":"/tmp","hook_event_name":"UserPromptSubmit","prompt":"/deploy now"}`
+	code, out = runHook(t, "user-prompt-submit", []byte(prompt), "--policy", policy)
+	if code != ExitSuccess {
+		t.Fatalf("exit = %d, output:\n%s", code, out)
+	}
+	requireBlockPrompt(t, out)
+}
+
+func TestDirectoryScopedSkillName(t *testing.T) {
+	home, policy := isolatedHookEnv(t)
+	project := filepath.Join(home, "project")
+	writeUnsignedSkill(t, filepath.Join(project, "apps", "web", ".claude", "skills", "deploy"))
+
+	// Found relative to cwd.
+	skill := `{"session_id":"s","cwd":"` + project + `","hook_event_name":"PreToolUse","tool_name":"Skill","tool_input":{"skill":"apps/web:deploy"}}`
+	code, out := runHook(t, "pre-tool-use", []byte(skill), "--policy", policy)
+	if code != ExitSuccess {
+		t.Fatalf("exit = %d, output:\n%s", code, out)
+	}
+	if reason := requireDeny(t, out); !strings.Contains(reason, filepath.Join("apps", "web", ".claude", "skills", "deploy")) {
+		t.Errorf("reason should name the nested root, got: %s", reason)
+	}
+
+	// Found relative to CLAUDE_PROJECT_DIR when cwd is elsewhere.
+	t.Setenv("CLAUDE_PROJECT_DIR", project)
+	skill = `{"session_id":"s","cwd":"/tmp","hook_event_name":"PreToolUse","tool_name":"Skill","tool_input":{"skill":"apps/web:deploy"}}`
+	code, out = runHook(t, "pre-tool-use", []byte(skill), "--policy", policy)
+	if code != ExitSuccess {
+		t.Fatalf("exit = %d, output:\n%s", code, out)
+	}
+	requireDeny(t, out)
+
+	// Traversal prefixes are rejected (resolve to nothing, so allowed as
+	// an unknown name rather than probing arbitrary directories).
+	writeUnsignedSkill(t, filepath.Join(home, "outside", ".claude", "skills", "deploy"))
+	for _, name := range []string{"../outside:deploy", "apps/../../outside:deploy"} {
+		skill = `{"session_id":"s","cwd":"` + project + `","hook_event_name":"PreToolUse","tool_name":"Skill","tool_input":{"skill":"` + name + `"}}`
+		code, out = runHook(t, "pre-tool-use", []byte(skill), "--policy", policy)
+		if code != ExitSuccess {
+			t.Fatalf("%s: exit = %d, output:\n%s", name, code, out)
+		}
+		if strings.Contains(out, filepath.Join("outside", ".claude")) {
+			t.Errorf("%s: traversal prefix must not resolve outside the project, got: %s", name, out)
+		}
+	}
+}
+
+func TestHookDispatchFromSubcommand(t *testing.T) {
+	home, policy := isolatedHookEnv(t)
+	writeUnsignedSkill(t, filepath.Join(home, ".claude", "skills", "uns"))
+
+	// No hook_event_name: the subcommand decides the event.
+	in := `{"session_id":"s","cwd":"/tmp","tool_name":"Skill","tool_input":{"skill":"uns"}}`
+	code, out := runHook(t, "pre-tool-use", []byte(in), "--policy", policy)
+	if code != ExitSuccess {
+		t.Fatalf("exit = %d, output:\n%s", code, out)
+	}
+	requireDeny(t, out)
+
+	// Event in stdin disagrees with the subcommand: blocking error.
+	in = `{"session_id":"s","cwd":"/tmp","hook_event_name":"SessionStart","tool_name":"Skill","tool_input":{"skill":"uns"}}`
+	code, out = runHook(t, "pre-tool-use", []byte(in), "--policy", policy)
+	if code != ExitError {
+		t.Errorf("mismatched event: exit = %d, want %d, output:\n%s", code, ExitError, out)
+	}
+	if !strings.Contains(out, "skill-trust:") {
+		t.Errorf("mismatched event: expected stderr message, got: %s", out)
+	}
+
+	// Non-object JSON: blocking error.
+	for _, raw := range []string{"null", " null\n", `"text"`, "42", "[]"} {
+		code, out = runHook(t, "pre-tool-use", []byte(raw), "--policy", policy)
+		if code != ExitError {
+			t.Errorf("stdin %q: exit = %d, want %d, output:\n%s", raw, code, ExitError, out)
+		}
+	}
+}
+
+func TestPreToolUseExpandsHomeInCommands(t *testing.T) {
+	home, policy := isolatedHookEnv(t)
+	writeUnsignedSkill(t, filepath.Join(home, ".claude", "skills", "uns"))
+
+	for _, command := range []string{
+		"cat ~/.claude/skills/uns/SKILL.md",
+		"cat $HOME/.claude/skills/uns/SKILL.md",
+		"cat \"${HOME}/.claude/skills/uns/SKILL.md\"",
+	} {
+		input, _ := json.Marshal(map[string]any{
+			"session_id": "s", "cwd": "/tmp", "hook_event_name": "PreToolUse",
+			"tool_name": "Bash", "tool_input": map[string]any{"command": command},
+		})
+		code, out := runHook(t, "pre-tool-use", input, "--policy", policy)
+		if code != ExitSuccess {
+			t.Fatalf("%s: exit = %d, output:\n%s", command, code, out)
+		}
+		requireDeny(t, out)
+	}
+}
+
+func TestSessionStartReportOnlyCountsUnverified(t *testing.T) {
+	home, policy := isolatedHookEnv(t)
+	writeUnsignedSkill(t, filepath.Join(home, ".claude", "skills", "uns"))
+	setupHookTest(t, home, "good", false)
+	policy = filepath.Join(home, "policy.json") // policy matching the signed skill
+
+	in := `{"session_id":"s","cwd":"/tmp","hook_event_name":"SessionStart","source":"startup"}`
+	code, out := runHook(t, "session-start", []byte(in), "--policy", policy, "--strict=false")
+	if code != ExitSuccess {
+		t.Fatalf("exit = %d, output:\n%s", code, out)
+	}
+	var result struct {
+		SystemMessage string `json:"systemMessage"`
+	}
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatalf("bad JSON %q: %v", out, err)
+	}
+	want := "skill-trust: 1 skills verified, 0 blocked, 1 unverified (report-only)"
+	if result.SystemMessage != want {
+		t.Errorf("systemMessage = %q, want %q", result.SystemMessage, want)
+	}
+
+	// Strict mode keeps the existing format (no unverified part).
+	code, out = runHook(t, "session-start", []byte(in), "--policy", policy)
+	if code != ExitSuccess {
+		t.Fatalf("exit = %d, output:\n%s", code, out)
+	}
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatalf("bad JSON %q: %v", out, err)
+	}
+	if !strings.HasPrefix(result.SystemMessage, "skill-trust: 1 skills verified, 1 blocked (uns: ST-PREFLIGHT-NOT-VERIFIED)") {
+		t.Errorf("strict systemMessage = %q", result.SystemMessage)
+	}
+
+	// Missing policy in report-only: every skill is reported blocked.
+	code, out = runHook(t, "session-start", []byte(in), "--policy", "/nonexistent/policy.json", "--strict=false")
+	if code != ExitSuccess {
+		t.Fatalf("exit = %d, output:\n%s", code, out)
+	}
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatalf("bad JSON %q: %v", out, err)
+	}
+	if !strings.HasPrefix(result.SystemMessage, "skill-trust: 0 skills verified, 2 blocked") {
+		t.Errorf("missing-policy report-only systemMessage = %q", result.SystemMessage)
 	}
 }
