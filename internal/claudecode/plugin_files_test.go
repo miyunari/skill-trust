@@ -3,7 +3,10 @@ package claudecode
 import (
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"regexp"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -112,31 +115,71 @@ func TestPluginFiles(t *testing.T) {
 			}
 		}
 
-		// Verify each command references a valid event
+		// Verify each command starts with the quoted binary expansion
+		expectedPrefix := `"${CLAUDE_PLUGIN_OPTION_BINARY:-skill-trust}" `
+		hookEventRE := regexp.MustCompile(`hook claude-code (\S+)`)
+
 		for _, cmd := range commands {
-			if !strings.Contains(cmd, "hook claude-code ") {
-				t.Errorf("hook command does not contain 'hook claude-code ': %q", cmd)
+			// Assert command starts with the quoted binary expansion
+			if !strings.HasPrefix(cmd, expectedPrefix) {
+				t.Errorf("hook command does not start with %q: %q", expectedPrefix, cmd)
 				continue
 			}
 
-			// Extract the event name from the command
-			parts := strings.Split(cmd, "hook claude-code ")
-			if len(parts) < 2 {
-				t.Errorf("malformed hook command: %q", cmd)
+			// Extract the event name using regex
+			matches := hookEventRE.FindStringSubmatch(cmd)
+			if len(matches) < 2 {
+				t.Errorf("failed to extract event from hook command: %q", cmd)
 				continue
 			}
-			eventPart := strings.TrimSpace(parts[1])
-			// The event name should be the last token in the command
-			tokens := strings.Fields(eventPart)
-			if len(tokens) == 0 {
-				t.Errorf("no event found in hook command: %q", cmd)
-				continue
-			}
-			event := tokens[len(tokens)-1]
+			event := matches[1]
 
 			if !validEvents[event] {
 				t.Errorf("hook command references unknown event %q (command: %q)", event, cmd)
 			}
+		}
+
+		// Real shell check: verify the command works with a path containing spaces
+		if runtime.GOOS != "windows" {
+			t.Run("ShellCheck", func(t *testing.T) {
+				// Create a temp script with a space in its path
+				tmpDir := t.TempDir()
+				scriptDir := filepath.Join(tmpDir, "path with spaces")
+				if err := os.Mkdir(scriptDir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				scriptPath := filepath.Join(scriptDir, "skill-trust")
+
+				// Write a script that echoes its arguments
+				script := "#!/bin/sh\necho \"$@\"\n"
+				if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+					t.Fatal(err)
+				}
+
+				// Test each command
+				for _, cmd := range commands {
+					// Extract the expected event
+					matches := hookEventRE.FindStringSubmatch(cmd)
+					if len(matches) < 2 {
+						continue // Already reported above
+					}
+					event := matches[1]
+
+					// Run the command via sh -c with CLAUDE_PLUGIN_OPTION_BINARY set
+					shellCmd := exec.Command("sh", "-c", cmd)
+					shellCmd.Env = append(os.Environ(), "CLAUDE_PLUGIN_OPTION_BINARY="+scriptPath)
+					output, err := shellCmd.CombinedOutput()
+					if err != nil {
+						t.Errorf("command failed: %v\nCommand: %s\nOutput: %s", err, cmd, output)
+						continue
+					}
+
+					expectedOutput := "hook claude-code " + event + "\n"
+					if string(output) != expectedOutput {
+						t.Errorf("unexpected output for command %q\nExpected: %q\nGot: %q", cmd, expectedOutput, string(output))
+					}
+				}
+			})
 		}
 	})
 
