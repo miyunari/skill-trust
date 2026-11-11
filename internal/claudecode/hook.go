@@ -280,8 +280,10 @@ func SessionStart(cfg Config, in HookInput) []byte {
 		msgParts = append(msgParts, fmt.Sprintf("(%s)", strings.Join(names, ", ")))
 	}
 
-	// Add version warning placeholder (Task 5)
-	// versionWarning(cfg) would go here
+	// Add version warning if CLI and plugin versions differ
+	if warning := versionWarning(cfg); warning != "" {
+		msgParts = append(msgParts, "; "+warning)
+	}
 
 	if cfg.Policy == "" {
 		msgParts = append(msgParts, "; policy not configured")

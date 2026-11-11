@@ -22,8 +22,8 @@ func TestPluginFiles(t *testing.T) {
 
 	// Expected hook events that the CLI registers
 	validEvents := map[string]bool{
-		"session-start":       true,
-		"pre-tool-use":        true,
+		"session-start":      true,
+		"pre-tool-use":       true,
 		"user-prompt-submit": true,
 	}
 
@@ -35,11 +35,11 @@ func TestPluginFiles(t *testing.T) {
 		}
 
 		var plugin struct {
-			Name        string `json:"name"`
-			Version     string `json:"version"`
-			Description string `json:"description"`
-			Repository  string `json:"repository"`
-			Hooks       string `json:"hooks"`
+			Name        string                 `json:"name"`
+			Version     string                 `json:"version"`
+			Description string                 `json:"description"`
+			Repository  string                 `json:"repository"`
+			Hooks       string                 `json:"hooks"`
 			UserConfig  map[string]interface{} `json:"userConfig"`
 		}
 
@@ -216,6 +216,37 @@ func TestPluginFiles(t *testing.T) {
 
 		if !found {
 			t.Error("marketplace.json does not contain a 'skill-trust' plugin entry")
+		}
+	})
+
+	// Test plugin.json version matches git tag (CI enforcement)
+	t.Run("PluginVersionMatchesTag", func(t *testing.T) {
+		refType := os.Getenv("GITHUB_REF_TYPE")
+		refName := os.Getenv("GITHUB_REF_NAME")
+
+		if refType != "tag" || !strings.HasPrefix(refName, "v") {
+			t.Skip("skipping: not a tag build")
+		}
+
+		// Tag should be like "v0.2.0", plugin version should be "0.2.0"
+		expectedVersion := strings.TrimPrefix(refName, "v")
+
+		data, err := os.ReadFile(pluginJSONPath)
+		if err != nil {
+			t.Fatalf("failed to read plugin.json: %v", err)
+		}
+
+		var plugin struct {
+			Version string `json:"version"`
+		}
+
+		if err := json.Unmarshal(data, &plugin); err != nil {
+			t.Fatalf("failed to parse plugin.json: %v", err)
+		}
+
+		if plugin.Version != expectedVersion {
+			t.Errorf("plugin.json version %q does not match tag %q (expected %q)",
+				plugin.Version, refName, expectedVersion)
 		}
 	})
 }

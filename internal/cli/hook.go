@@ -135,6 +135,7 @@ func buildConfig(cwd string, stderr io.Writer) claudecode.Config {
 		Policy:     policyPath,
 		Strict:     hookStrict,
 		StateDir:   claudecode.StateDir(),
+		PluginRoot: os.Getenv("CLAUDE_PLUGIN_ROOT"),
 		CLIVersion: Version().Version,
 		Locations:  claudecode.DefaultLocations(cwd),
 		Stderr:     stderr,

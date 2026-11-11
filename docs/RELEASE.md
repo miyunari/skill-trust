@@ -82,6 +82,16 @@ restrictive umask).
 
 ## Releasing
 
+Before creating a release tag:
+
+1. Update `adapters/claude-code/.claude-plugin/plugin.json` `version` field to
+   match the tag version (without the `v` prefix). For example, for tag
+   `v0.2.0`, the plugin version should be `0.2.0`.
+2. CI enforces this lockstep on tag builds (see
+   `TestPluginVersionMatchesTag` in `internal/claudecode/plugin_files_test.go`).
+
+Then tag and push:
+
 ```console
 $ git tag v0.1.0
 $ git push origin v0.1.0
