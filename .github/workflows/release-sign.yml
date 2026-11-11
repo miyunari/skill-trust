@@ -59,7 +59,7 @@ jobs:
           echo "signing $GITHUB_REF against $TARGET"
 
       - name: Build
-        run: go build -o /tmp/skill-trust ./cmd/skill-trust
+        run: go build -ldflags "-X github.com/redhat-et/skill-trust/internal/cli.buildVersion=${GITHUB_REF_NAME}" -o /tmp/skill-trust ./cmd/skill-trust
 
       - name: Stage skills
         run: |
