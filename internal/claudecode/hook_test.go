@@ -302,7 +302,8 @@ func TestUserPromptSubmitTrimsLeadingWhitespace(t *testing.T) {
 
 func TestSessionStartSummaryAndPruning(t *testing.T) {
 	stateDir := t.TempDir()
-	home := t.TempDir()
+	// Home reached through a symlink, as on macOS (/var -> /private/var).
+	home := symlinkedTempDir(t)
 
 	// Create good and bad skills
 	goodRoot := filepath.Join(home, ".claude", "skills", "good-skill")
@@ -311,6 +312,10 @@ func TestSessionStartSummaryAndPruning(t *testing.T) {
 	os.MkdirAll(badRoot, 0o755)
 	os.WriteFile(filepath.Join(goodRoot, "SKILL.md"), []byte("# Good"), 0o644)
 	os.WriteFile(filepath.Join(badRoot, "SKILL.md"), []byte("# Bad"), 0o644)
+
+	// Discovery reports symlink-free roots, so the fake verifier is keyed
+	// by the resolved paths.
+	goodRoot, badRoot = NormalizePath(goodRoot), NormalizePath(badRoot)
 
 	// Fake verifier: good-skill passes, bad-skill fails
 	fakeVer := fakeVerifier{

@@ -67,7 +67,9 @@ func TestNormalizePath(t *testing.T) {
 
 	// Test case: handle double slashes and .. in nonexistent paths
 	t.Run("DoubleSlashAndDotDot", func(t *testing.T) {
-		tmpReal := t.TempDir()
+		// Reach the temp dir through a symlink, as on macOS where
+		// /var -> /private/var; NormalizePath must return the real path.
+		tmpReal := symlinkedTempDir(t)
 		// Create /tmp/x/a
 		aDir := filepath.Join(tmpReal, "a")
 		os.Mkdir(aDir, 0o755)
@@ -75,8 +77,12 @@ func TestNormalizePath(t *testing.T) {
 		// Path with double slash and ..
 		p := filepath.Join(tmpReal, "a//b/../missing")
 		got := NormalizePath(p)
-		// Should clean to /tmp/x/a/missing
-		expected := filepath.Join(tmpReal, "a", "missing")
+		// Should clean to <realpath>/a/missing
+		resolved, err := filepath.EvalSymlinks(tmpReal)
+		if err != nil {
+			t.Fatal(err)
+		}
+		expected := filepath.Join(resolved, "a", "missing")
 		if got != expected {
 			t.Errorf("NormalizePath(%q) = %q, want %q", p, got, expected)
 		}
@@ -299,4 +305,21 @@ func TestCommandPathsExpandsHome(t *testing.T) {
 	if !found {
 		t.Errorf("CandidatePaths did not expand ~ in file_path: %v", got)
 	}
+}
+
+// symlinkedTempDir returns a path to a fresh temp directory that is reached
+// through a symlink, reproducing macOS where t.TempDir() lives under
+// /var -> /private/var. Tests must compare against resolved paths.
+func symlinkedTempDir(t *testing.T) string {
+	t.Helper()
+	base := t.TempDir()
+	real := filepath.Join(base, "real")
+	if err := os.Mkdir(real, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(base, "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	return link
 }
