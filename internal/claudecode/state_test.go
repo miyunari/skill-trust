@@ -70,6 +70,24 @@ func TestLoadStateCorruptJSON(t *testing.T) {
 	}
 }
 
+func TestLoadStateJSONNull(t *testing.T) {
+	tmp := t.TempDir()
+	sessionID := "null-session"
+
+	// Write JSON null
+	stateFile := filepath.Join(tmp, "state-"+sessionID+".json")
+	os.WriteFile(stateFile, []byte("null"), 0o600)
+
+	// Should return empty non-nil State
+	state := LoadState(tmp, sessionID)
+	if state == nil {
+		t.Error("LoadState with JSON null returned nil, want empty non-nil State")
+	}
+	if len(state) != 0 {
+		t.Errorf("LoadState with JSON null returned %d entries, want 0", len(state))
+	}
+}
+
 func TestLoadStateMissing(t *testing.T) {
 	tmp := t.TempDir()
 

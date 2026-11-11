@@ -179,21 +179,6 @@ func TestRootOfSymlinkedInstall(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Verify symlink was created
-	if _, err := os.Stat(symlinkPath); err != nil {
-		t.Fatalf("symlink not accessible: %v", err)
-	}
-
-	// Check what's in homeSkills
-	entries, err := os.ReadDir(homeSkills)
-	if err != nil {
-		t.Fatalf("cannot read homeSkills: %v", err)
-	}
-	t.Logf("homeSkills has %d entries", len(entries))
-	for _, e := range entries {
-		t.Logf("  Entry: %s, IsDir=%v", e.Name(), e.IsDir())
-	}
-
 	loc := Locations{
 		Home: filepath.Join(tmp, "home"),
 		Cwd:  tmp,
@@ -202,13 +187,6 @@ func TestRootOfSymlinkedInstall(t *testing.T) {
 
 	// Both paths should map to the realpath of src/foo
 	srcRealpath := NormalizePath(srcDir)
-
-	t.Logf("Discovered %d skills", len(skills))
-	for _, s := range skills {
-		t.Logf("  Skill: %s at %s", s.Name, s.Root)
-	}
-	t.Logf("srcDir = %s", srcDir)
-	t.Logf("srcRealpath = %s", srcRealpath)
 
 	root1, ok1 := loc.RootOf(filepath.Join(homeSkills, "foo", "SKILL.md"), skills)
 	if !ok1 {
@@ -219,17 +197,37 @@ func TestRootOfSymlinkedInstall(t *testing.T) {
 	}
 
 	skillMDPath := filepath.Join(srcDir, "SKILL.md")
-	t.Logf("Calling RootOf with %s", skillMDPath)
 	root2, ok2 := loc.RootOf(skillMDPath, skills)
 	if !ok2 {
-		t.Fatalf("RootOf via real path returned false, discovered skills: %+v", skills)
+		t.Fatalf("RootOf via real path returned false")
 	}
 	if root2 != srcRealpath {
 		t.Errorf("RootOf via real path = %q, want %q", root2, srcRealpath)
 	}
 }
 
-func TestResolveSkillName(t *testing.T) {
+func TestRootOfPluginCacheBoundary(t *testing.T) {
+	tmp := t.TempDir()
+
+	// Create PluginsDir/cache-evil/.../skills/x (should NOT match)
+	evilDir := filepath.Join(tmp, "plugins", "cache-evil", "m", "p", "1.0", "skills", "x")
+	os.MkdirAll(evilDir, 0o755)
+	os.WriteFile(filepath.Join(evilDir, "SKILL.md"), []byte("evil"), 0o644)
+
+	loc := Locations{
+		Home:       tmp,
+		Cwd:        tmp,
+		PluginsDir: filepath.Join(tmp, "plugins"),
+	}
+
+	path := filepath.Join(evilDir, "scripts", "test.sh")
+	root, ok := loc.RootOf(path, nil)
+	if ok {
+		t.Errorf("RootOf(%q) should not match cache-evil, got %q", path, root)
+	}
+}
+
+func TestResolveSkillNames(t *testing.T) {
 	skills := []Skill{
 		{Name: "deploy", Root: "/proj/.claude/skills/deploy"},
 		{Name: "p:s", Root: "/plugins/p/skills/s"},
@@ -237,36 +235,64 @@ func TestResolveSkillName(t *testing.T) {
 	}
 
 	tests := []struct {
-		name     string
-		input    string
-		wantRoot string
-		wantOk   bool
+		name      string
+		input     string
+		wantRoots []string
 	}{
-		{"ExactMatch", "deploy", "/proj/.claude/skills/deploy", true},
-		{"PluginMatch", "p:s", "/plugins/p/skills/s", true},
-		{"NestedMatch", "apps/web:deploy", "/proj/apps/web/.claude/skills/deploy", true},
-		{"UnknownSkill", "unknown", "", false},
-		{"AmbiguousSuffix", "deploy", "/proj/.claude/skills/deploy", true}, // exact match wins
+		{"ExactMatch", "deploy", []string{"/proj/.claude/skills/deploy"}},
+		{"PluginMatch", "p:s", []string{"/plugins/p/skills/s"}},
+		{"NestedMatch", "apps/web:deploy", []string{"/proj/apps/web/.claude/skills/deploy"}},
+		{"UnknownSkill", "unknown", nil},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			gotRoot, gotOk := ResolveSkillName(tt.input, skills)
-			if gotOk != tt.wantOk {
-				t.Errorf("ResolveSkillName(%q) ok = %v, want %v", tt.input, gotOk, tt.wantOk)
+			gotRoots := ResolveSkillNames(tt.input, skills)
+			if len(gotRoots) != len(tt.wantRoots) {
+				t.Errorf("ResolveSkillNames(%q) returned %d roots, want %d", tt.input, len(gotRoots), len(tt.wantRoots))
 			}
-			if gotRoot != tt.wantRoot {
-				t.Errorf("ResolveSkillName(%q) root = %q, want %q", tt.input, gotRoot, tt.wantRoot)
+			for i, want := range tt.wantRoots {
+				if i >= len(gotRoots) || gotRoots[i] != want {
+					t.Errorf("ResolveSkillNames(%q) = %v, want %v", tt.input, gotRoots, tt.wantRoots)
+					break
+				}
 			}
 		})
 	}
 
 	// Test suffix match with exactly one candidate
-	skillsSuffixOnly := []Skill{
-		{Name: "apps/web:deploy", Root: "/proj/apps/web/.claude/skills/deploy"},
-	}
-	root, ok := ResolveSkillName("deploy", skillsSuffixOnly)
-	if !ok || root != "/proj/apps/web/.claude/skills/deploy" {
-		t.Errorf("ResolveSkillName(deploy) with suffix-only = (%q, %v), want match", root, ok)
-	}
+	t.Run("SuffixMatchUnique", func(t *testing.T) {
+		skillsSuffixOnly := []Skill{
+			{Name: "apps/web:deploy", Root: "/proj/apps/web/.claude/skills/deploy"},
+		}
+		roots := ResolveSkillNames("deploy", skillsSuffixOnly)
+		if len(roots) != 1 || roots[0] != "/proj/apps/web/.claude/skills/deploy" {
+			t.Errorf("ResolveSkillNames(deploy) with suffix-only = %v, want one match", roots)
+		}
+	})
+
+	// Test multiple exact matches (e.g., home and project both have "deploy")
+	t.Run("MultipleExactMatches", func(t *testing.T) {
+		multiSkills := []Skill{
+			{Name: "deploy", Root: "/home/.claude/skills/deploy"},
+			{Name: "deploy", Root: "/project/.claude/skills/deploy"},
+		}
+		roots := ResolveSkillNames("deploy", multiSkills)
+		if len(roots) != 2 {
+			t.Errorf("ResolveSkillNames(deploy) with duplicates returned %d roots, want 2", len(roots))
+		}
+		hasHome := false
+		hasProject := false
+		for _, r := range roots {
+			if r == "/home/.claude/skills/deploy" {
+				hasHome = true
+			}
+			if r == "/project/.claude/skills/deploy" {
+				hasProject = true
+			}
+		}
+		if !hasHome || !hasProject {
+			t.Errorf("ResolveSkillNames(deploy) = %v, want both home and project", roots)
+		}
+	})
 }

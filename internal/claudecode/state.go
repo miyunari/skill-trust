@@ -56,6 +56,11 @@ func LoadState(dir, sessionID string) State {
 		return State{}
 	}
 
+	// JSON null yields nil map, convert to empty non-nil State
+	if state == nil {
+		return State{}
+	}
+
 	return state
 }
 
@@ -75,12 +80,28 @@ func SaveState(dir, sessionID string, s State) error {
 	}
 
 	// Atomic write: temp file + rename
-	tmpFile := stateFile + ".tmp"
-	if err := os.WriteFile(tmpFile, data, 0o600); err != nil {
+	tmpFile, err := os.CreateTemp(dir, "*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmpFile.Name()
+	defer os.Remove(tmpPath) // Clean up on error
+
+	if err := tmpFile.Chmod(0o600); err != nil {
+		tmpFile.Close()
 		return err
 	}
 
-	return os.Rename(tmpFile, stateFile)
+	if _, err := tmpFile.Write(data); err != nil {
+		tmpFile.Close()
+		return err
+	}
+
+	if err := tmpFile.Close(); err != nil {
+		return err
+	}
+
+	return os.Rename(tmpPath, stateFile)
 }
 
 // PruneStates removes state files older than maxAge.

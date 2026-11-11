@@ -64,6 +64,23 @@ func TestNormalizePath(t *testing.T) {
 			t.Errorf("expected %s, got %s", p, got)
 		}
 	})
+
+	// Test case: handle double slashes and .. in nonexistent paths
+	t.Run("DoubleSlashAndDotDot", func(t *testing.T) {
+		tmpReal := t.TempDir()
+		// Create /tmp/x/a
+		aDir := filepath.Join(tmpReal, "a")
+		os.Mkdir(aDir, 0o755)
+
+		// Path with double slash and ..
+		p := filepath.Join(tmpReal, "a//b/../missing")
+		got := NormalizePath(p)
+		// Should clean to /tmp/x/a/missing
+		expected := filepath.Join(tmpReal, "a", "missing")
+		if got != expected {
+			t.Errorf("NormalizePath(%q) = %q, want %q", p, got, expected)
+		}
+	})
 }
 
 func TestCommandPaths(t *testing.T) {
@@ -223,13 +240,21 @@ func TestCandidatePaths(t *testing.T) {
 
 	t.Run("NonexistentFileInRoot", func(t *testing.T) {
 		root := t.TempDir()
+		realRoot, _ := filepath.EvalSymlinks(root)
 		input := map[string]any{
 			"file_path": filepath.Join(root, "scripts/new.sh"),
 		}
 		got := CandidatePaths(input, root)
-		// Should normalize even if it doesn't exist
-		if len(got) < 2 {
-			t.Errorf("got %v, expected at least root and file path", got)
+		expected := filepath.Join(realRoot, "scripts", "new.sh")
+		hasExpected := false
+		for _, p := range got {
+			if p == expected {
+				hasExpected = true
+				break
+			}
+		}
+		if !hasExpected {
+			t.Errorf("got %v, expected to contain %s", got, expected)
 		}
 	})
 

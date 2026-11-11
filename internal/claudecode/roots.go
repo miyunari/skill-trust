@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 )
 
@@ -128,7 +129,7 @@ func (l Locations) Discover() []Skill {
 		}
 	}
 
-	// Plugin skills from installed_plugins.json
+	// Plugin skills from installed_plugins.json (deterministic order)
 	pluginsJSON := filepath.Join(l.PluginsDir, "installed_plugins.json")
 	if data, err := os.ReadFile(pluginsJSON); err == nil {
 		var installed struct {
@@ -137,7 +138,15 @@ func (l Locations) Discover() []Skill {
 			} `json:"plugins"`
 		}
 		if err := json.Unmarshal(data, &installed); err == nil {
-			for pluginKey, installs := range installed.Plugins {
+			// Sort plugin keys for deterministic order
+			var pluginKeys []string
+			for key := range installed.Plugins {
+				pluginKeys = append(pluginKeys, key)
+			}
+			sort.Strings(pluginKeys)
+
+			for _, pluginKey := range pluginKeys {
+				installs := installed.Plugins[pluginKey]
 				// Extract plugin name (before @)
 				pluginName := pluginKey
 				if idx := strings.Index(pluginKey, "@"); idx > 0 {
@@ -204,8 +213,9 @@ func (l Locations) RootOf(path string, discovered []Skill) (string, bool) {
 					return NormalizePath(current), true
 				}
 
-				// Or under PluginsDir/cache
-				if strings.HasPrefix(grandparent, filepath.Join(l.PluginsDir, "cache")) {
+				// Or under PluginsDir/cache (check separator boundary)
+				cacheDir := filepath.Join(l.PluginsDir, "cache")
+				if grandparent == cacheDir || strings.HasPrefix(grandparent, cacheDir+string(filepath.Separator)) {
 					return NormalizePath(current), true
 				}
 			}
@@ -228,15 +238,20 @@ func (l Locations) RootOf(path string, discovered []Skill) (string, bool) {
 	return "", false
 }
 
-// ResolveSkillName resolves a skill name to its root. Returns the first
-// exact match, or if exactly one skill matches the suffix after the last
-// colon (for nested-prefixed names like "apps/web:deploy"), returns that.
-func ResolveSkillName(name string, discovered []Skill) (string, bool) {
-	// Exact match first
+// ResolveSkillNames resolves a skill name to all matching roots. Returns
+// every root whose Name matches exactly; if none, the unique root whose
+// name's segment after the last ':' equals name's segment after its last ':'
+// (only if exactly one); else nil.
+func ResolveSkillNames(name string, discovered []Skill) []string {
+	// Exact matches first
+	var exactMatches []string
 	for _, s := range discovered {
 		if s.Name == name {
-			return s.Root, true
+			exactMatches = append(exactMatches, s.Root)
 		}
+	}
+	if len(exactMatches) > 0 {
+		return exactMatches
 	}
 
 	// Suffix match on the segment after the last colon
@@ -245,20 +260,20 @@ func ResolveSkillName(name string, discovered []Skill) (string, bool) {
 		suffix = name[idx+1:]
 	}
 
-	var matches []Skill
+	var matches []string
 	for _, s := range discovered {
 		skillSuffix := s.Name
 		if idx := strings.LastIndex(s.Name, ":"); idx >= 0 {
 			skillSuffix = s.Name[idx+1:]
 		}
 		if skillSuffix == suffix {
-			matches = append(matches, s)
+			matches = append(matches, s.Root)
 		}
 	}
 
 	if len(matches) == 1 {
-		return matches[0].Root, true
+		return matches
 	}
 
-	return "", false
+	return nil
 }

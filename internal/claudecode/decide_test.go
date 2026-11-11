@@ -287,20 +287,45 @@ func TestDecideTable(t *testing.T) {
 func TestDecideVerifierError(t *testing.T) {
 	now := time.Now()
 
-	t.Run("VerifierErrorStrict", func(t *testing.T) {
+	t.Run("VerifierErrorWithPrevAllowed", func(t *testing.T) {
 		root := t.TempDir()
+		prev := &Record{
+			Allowed:    true,
+			Digest:     "prev-digest",
+			VerifiedAt: now.Add(-time.Hour),
+		}
+		verifier := errorVerifier{err: fmt.Errorf("verifier crashed")}
+
+		outcome, newRecord := Decide(verifier, root, prev, true, now)
+
+		// Error + prev allowed → CHANGED-AFTER-VERIFY
+		if outcome.Allowed {
+			t.Error("expected blocked")
+		}
+		if outcome.Block == nil || outcome.Block.Code != preflight.CodeChangedAfterVerify {
+			t.Errorf("expected CodeChangedAfterVerify, got %v", outcome.Block)
+		}
+		if newRecord != nil {
+			t.Error("expected nil record (sticky)")
+		}
+	})
+
+	t.Run("VerifierErrorUnsignedStrict", func(t *testing.T) {
+		root := t.TempDir()
+		// Don't create .skill-trust (unsigned)
 		verifier := errorVerifier{err: fmt.Errorf("verifier crashed")}
 
 		outcome, newRecord := Decide(verifier, root, nil, true, now)
 
+		// Error + unsigned + strict → NOT-VERIFIED
 		if outcome.Allowed {
-			t.Error("expected blocked, got allowed")
+			t.Error("expected blocked")
 		}
-		if outcome.Block == nil || outcome.Block.Code != preflight.CodeVerifierFailure {
-			t.Errorf("expected CodeVerifierFailure, got %v", outcome.Block)
+		if outcome.Block == nil || outcome.Block.Code != preflight.CodeNotVerified {
+			t.Errorf("expected CodeNotVerified, got %v", outcome.Block)
 		}
 		if newRecord != nil {
-			t.Error("expected nil record for verifier error")
+			t.Error("expected nil record")
 		}
 	})
 
@@ -310,14 +335,15 @@ func TestDecideVerifierError(t *testing.T) {
 
 		outcome, newRecord := Decide(verifier, root, nil, false, now)
 
+		// Error + none/not-allowed + strict=false → allow with warning
 		if !outcome.Allowed {
-			t.Error("expected allowed with warning for non-strict + no record")
+			t.Error("expected allowed with warning")
 		}
 		if outcome.Warning == "" {
 			t.Error("expected warning")
 		}
 		if newRecord != nil {
-			t.Error("expected nil record for verifier error")
+			t.Error("expected nil record")
 		}
 	})
 }
@@ -410,12 +436,12 @@ func TestDecideUnsignedDetection(t *testing.T) {
 		}
 	})
 
-	t.Run("UnsignedWithSTMetadataCode", func(t *testing.T) {
+	t.Run("SignedWithSTMetadataCode", func(t *testing.T) {
 		root := t.TempDir()
-		// Create .skill-trust directory (exists)
+		// Create .skill-trust directory (exists, so it's signed)
 		os.Mkdir(filepath.Join(root, ".skill-trust"), 0o755)
 
-		// But findings contain ST-METADATA-* code
+		// Findings contain ST-METADATA-* code but it's signed
 		verifier := fakeVerifier{
 			root: preflight.Result{
 				Decision: preflight.Block,
@@ -428,9 +454,9 @@ func TestDecideUnsignedDetection(t *testing.T) {
 
 		outcome, _ := Decide(verifier, root, nil, true, now)
 
-		// Should be treated as unsigned because of ST-METADATA-* code
-		if outcome.Block == nil || outcome.Block.Code != preflight.CodeNotVerified {
-			t.Errorf("expected CodeNotVerified for ST-METADATA-* code, got %v", outcome.Block)
+		// Should be CodeVerifierFailure (signed but failed)
+		if outcome.Block == nil || outcome.Block.Code != preflight.CodeVerifierFailure {
+			t.Errorf("expected CodeVerifierFailure for signed with ST-METADATA-* code, got %v", outcome.Block)
 		}
 	})
 }

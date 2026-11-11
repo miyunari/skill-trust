@@ -26,6 +26,9 @@ func NormalizePath(p string) string {
 		}
 	}
 
+	// Clean the path first to handle // and ..
+	abs = filepath.Clean(abs)
+
 	// Try to resolve the full path
 	resolved, err := filepath.EvalSymlinks(abs)
 	if err == nil {
@@ -33,7 +36,7 @@ func NormalizePath(p string) string {
 	}
 
 	// Path doesn't exist; resolve deepest existing ancestor
-	current := filepath.Clean(abs)
+	current := abs
 	for {
 		resolved, err := filepath.EvalSymlinks(current)
 		if err == nil {

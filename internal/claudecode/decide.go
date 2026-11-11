@@ -27,27 +27,19 @@ func Decide(v preflight.Verifier, root string, prev *Record, strict bool, now ti
 	// Run verification
 	result, err := v.VerifySkill(root)
 
-	// Handle verifier errors
+	// Convert verifier errors to blocked results and fall through the table
 	if err != nil {
-		outcome := Outcome{
-			Root:    root,
-			Allowed: false,
-			Block: &preflight.BlockError{
+		result = preflight.Result{
+			Decision: preflight.Block,
+			Findings: []preflight.Finding{{
 				Code:    preflight.CodeVerifierFailure,
-				Message: fmt.Sprintf("verification of %s failed: %v", root, err),
-			},
+				Message: err.Error(),
+			}},
 		}
-		// In non-strict mode with no previous record, allow with warning
-		if !strict && prev == nil {
-			outcome.Allowed = true
-			outcome.Warning = fmt.Sprintf("skill %s verification failed but allowed in non-strict mode: %v", root, err)
-			outcome.Block = nil
-		}
-		return outcome, nil
 	}
 
 	// Determine if unsigned
-	unsigned := isUnsigned(root, result)
+	unsigned := isUnsigned(root)
 
 	// Decision table implementation
 	if result.Allowed() {
@@ -157,24 +149,11 @@ func Decide(v preflight.Verifier, root string, prev *Record, strict bool, now ti
 }
 
 // isUnsigned determines if a skill is unsigned based on the controller ruling.
-// A root is unsigned iff:
-// 1. The directory <root>/.skill-trust does not exist, OR
-// 2. The result findings contain a ST-METADATA-* code
-func isUnsigned(root string, result preflight.Result) bool {
-	// Check if .skill-trust directory exists
+// A root is unsigned iff the directory <root>/.skill-trust does not exist.
+func isUnsigned(root string) bool {
 	skillTrustDir := filepath.Join(root, ".skill-trust")
-	if _, err := os.Stat(skillTrustDir); os.IsNotExist(err) {
-		return true
-	}
-
-	// Check for ST-METADATA-* codes in findings
-	for _, f := range result.Findings {
-		if strings.HasPrefix(f.Code, "ST-METADATA-") {
-			return true
-		}
-	}
-
-	return false
+	_, err := os.Stat(skillTrustDir)
+	return os.IsNotExist(err)
 }
 
 // Reason renders an Outcome as a single human-readable string with code,
