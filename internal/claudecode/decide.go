@@ -80,17 +80,16 @@ func Decide(v preflight.Verifier, root string, prev *Record, strict bool, now ti
 			}, nil
 		}
 
-		// Previous record was not allowed → block CodeChangedAfterVerify (sticky)
+		// Previous record was not allowed → allow and record (self-healing)
+		newRecord := &Record{
+			Allowed:    true,
+			Digest:     result.ManifestDigest,
+			VerifiedAt: now,
+		}
 		return Outcome{
 			Root:    root,
-			Allowed: false,
-			Block: &preflight.BlockError{
-				Code:           preflight.CodeChangedAfterVerify,
-				Message:        fmt.Sprintf("skill %s was previously blocked", root),
-				ExpectedDigest: prev.Digest,
-				ObservedDigest: result.ManifestDigest,
-			},
-		}, nil
+			Allowed: true,
+		}, newRecord
 	}
 
 	// Verification now: block

@@ -91,11 +91,11 @@ session-state record for the root (stored in
 
 | Verification now | Record `R` | strict=true | strict=false |
 |---|---|---|---|
-| allow | none | allow, record digest | allow, record digest |
+| allow | none or blocked | allow, record digest | allow, record digest |
 | allow | allowed, same digest | allow | allow |
 | allow | allowed, different digest | **block** `ST-PREFLIGHT-CHANGED-AFTER-VERIFY` | **block** `ST-PREFLIGHT-CHANGED-AFTER-VERIFY` |
 | block | allowed | **block** `ST-PREFLIGHT-CHANGED-AFTER-VERIFY` | **block** `ST-PREFLIGHT-CHANGED-AFTER-VERIFY` |
-| block | none / blocked | **block** `ST-PREFLIGHT-NOT-VERIFIED` (unsigned) or `ST-PREFLIGHT-VERIFIER-FAILURE` (signed, findings attached) | allow with warning |
+| block | none or blocked | **block** `ST-PREFLIGHT-NOT-VERIFIED` (unsigned) or `ST-PREFLIGHT-VERIFIER-FAILURE` (signed, findings attached) | allow with warning |
 
 **Blocks are sticky for the session**: a change-after-verify deny never
 overwrites the recorded digest, so "swap content, take one deny, retry" does

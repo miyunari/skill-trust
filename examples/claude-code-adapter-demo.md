@@ -6,8 +6,9 @@ a blocked tool call, a blocked slash command, and a new session summary showing
 the blocked skill.
 
 All output below is captured from real hook invocations of the built binary
-with piped JSON inputs. Commands use a temporary `HOME` to avoid touching the
-real `~/.claude`.
+with piped JSON inputs. Digests in the transcript are abbreviated with "…" for
+readability; everything else is verbatim. Commands use a temporary `HOME` to
+avoid touching the real `~/.claude`.
 
 ## Setup
 

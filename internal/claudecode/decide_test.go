@@ -130,6 +130,31 @@ func TestDecideTable(t *testing.T) {
 			wantBlockCode: preflight.CodeChangedAfterVerify,
 			wantRecordNil: true, // sticky
 		},
+		// Row: allow + not-allowed → allow and record (self-healing, both strict values)
+		{
+			name: "AllowAfterNotAllowedStrict",
+			verifyResult: preflight.Result{
+				Decision:       preflight.Allow,
+				ManifestDigest: "xyz789",
+				ObservedDigest: "xyz789",
+			},
+			prev:          &Record{Allowed: false, Digest: "abc123", VerifiedAt: now.Add(-time.Hour)},
+			strict:        true,
+			wantAllowed:   true,
+			wantNewRecord: true,
+		},
+		{
+			name: "AllowAfterNotAllowedNonStrict",
+			verifyResult: preflight.Result{
+				Decision:       preflight.Allow,
+				ManifestDigest: "xyz789",
+				ObservedDigest: "xyz789",
+			},
+			prev:          &Record{Allowed: false, Digest: "abc123", VerifiedAt: now.Add(-time.Hour)},
+			strict:        false,
+			wantAllowed:   true,
+			wantNewRecord: true,
+		},
 		// Row: block + allowed → block CodeChangedAfterVerify (both strict values)
 		{
 			name: "BlockAfterAllowedStrict",
