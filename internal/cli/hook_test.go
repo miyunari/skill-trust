@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/redhat-et/skill-trust/internal/claudecode"
 )
 
 // setupHookTest creates a home directory with a skill and returns the skill root.
@@ -277,8 +279,29 @@ func TestPreToolUseChangedAfterVerifyIsSticky(t *testing.T) {
 	t.Setenv("CLAUDE_PLUGIN_DATA", filepath.Join(home, ".claude"))
 	t.Setenv("CLAUDE_PROJECT_DIR", "")
 
-	skillRoot := setupHookTest(t, home, "cli-test", false)
-	policyPath := filepath.Join(home, "policy.json")
+	// Create skill and key
+	skillRoot := filepath.Join(home, ".claude", "skills", "cli-test")
+	if err := os.MkdirAll(filepath.Join(skillRoot, "scripts"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(filepath.Join(skillRoot, "SKILL.md"), []byte("---\nname: cli-test\n---\nOriginal.\n"), 0o644)
+	os.WriteFile(filepath.Join(skillRoot, "scripts/run.sh"), []byte("#!/usr/bin/env bash\necho hi\n"), 0o755)
+
+	keyPath, pubPath := newKey(t)
+	policyPath := keyPolicy(t, pubPath)
+	policyDest := filepath.Join(home, "policy.json")
+	policyData, err := os.ReadFile(policyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(policyDest, policyData, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	code, out := runCLI(t, "sign", skillRoot, "--key", keyPath)
+	if code != ExitSuccess {
+		t.Fatalf("sign exit = %d, output:\n%s", code, out)
+	}
 
 	// Session start to record the verified state
 	sessionInput := `{
@@ -286,18 +309,21 @@ func TestPreToolUseChangedAfterVerifyIsSticky(t *testing.T) {
 		"cwd": "/tmp",
 		"hook_event_name": "SessionStart"
 	}`
-	code, out := runHook(t, "session-start", []byte(sessionInput), "--policy", policyPath)
+	code, out = runHook(t, "session-start", []byte(sessionInput), "--policy", policyDest)
 	if code != ExitSuccess {
 		t.Fatalf("session-start exit = %d, output:\n%s", code, out)
 	}
 
 	// Tamper with the skill
-	tamperedContent := "---\nname: cli-test\n---\nTampered after verify!\n"
-	if err := os.WriteFile(filepath.Join(skillRoot, "SKILL.md"), []byte(tamperedContent), 0o644); err != nil {
-		t.Fatal(err)
+	os.WriteFile(filepath.Join(skillRoot, "SKILL.md"), []byte("---\nname: cli-test\n---\nTampered!\n"), 0o644)
+
+	// Re-sign with SAME key but different content
+	code, out = runCLI(t, "sign", skillRoot, "--key", keyPath)
+	if code != ExitSuccess {
+		t.Fatalf("re-sign exit = %d, output:\n%s", code, out)
 	}
 
-	// Try to use the skill - should be denied
+	// Verification should pass (valid signature), but Decide should deny (digest changed)
 	input := `{
 		"session_id": "test-session",
 		"cwd": "/tmp",
@@ -309,7 +335,7 @@ func TestPreToolUseChangedAfterVerifyIsSticky(t *testing.T) {
 		"permission_mode": "default"
 	}`
 
-	code, out = runHook(t, "pre-tool-use", []byte(input), "--policy", policyPath)
+	code, out = runHook(t, "pre-tool-use", []byte(input), "--policy", policyDest)
 	if code != ExitSuccess {
 		t.Fatalf("pre-tool-use exit = %d, output:\n%s", code, out)
 	}
@@ -322,43 +348,23 @@ func TestPreToolUseChangedAfterVerifyIsSticky(t *testing.T) {
 	hookOutput := result["hookSpecificOutput"].(map[string]any)
 	reason := hookOutput["permissionDecisionReason"].(string)
 	if !strings.Contains(reason, "ST-PREFLIGHT-CHANGED-AFTER-VERIFY") {
-		t.Errorf("expected ST-PREFLIGHT-CHANGED-AFTER-VERIFY, got: %s", reason)
-	}
-
-	// Re-sign with different content - should still be denied (sticky)
-	keyPath, _ := newKey(t)
-	differentContent := "---\nname: cli-test\n---\nDifferent content!\n"
-	if err := os.WriteFile(filepath.Join(skillRoot, "SKILL.md"), []byte(differentContent), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	code, out = runCLI(t, "sign", skillRoot, "--key", keyPath)
-	if code != ExitSuccess {
-		t.Fatalf("re-sign exit = %d, output:\n%s", code, out)
-	}
-
-	code, out = runHook(t, "pre-tool-use", []byte(input), "--policy", policyPath)
-	if code != ExitSuccess {
-		t.Fatalf("pre-tool-use after re-sign exit = %d, output:\n%s", code, out)
-	}
-
-	if err := json.Unmarshal([]byte(out), &result); err != nil {
-		t.Fatalf("output is not JSON: %v\n%s", err, out)
-	}
-
-	hookOutput = result["hookSpecificOutput"].(map[string]any)
-	reason = hookOutput["permissionDecisionReason"].(string)
-	if !strings.Contains(reason, "ST-PREFLIGHT-CHANGED-AFTER-VERIFY") {
-		t.Errorf("should still be denied after re-sign, got: %s", reason)
+		t.Errorf("expected ST-PREFLIGHT-CHANGED-AFTER-VERIFY after valid re-sign, got: %s", reason)
 	}
 
 	// New session should clear the sticky state
-	code, out = runHook(t, "session-start", []byte(sessionInput), "--policy", policyPath)
+	code, out = runHook(t, "session-start", []byte(sessionInput), "--policy", policyDest)
 	if code != ExitSuccess {
 		t.Fatalf("new session-start exit = %d, output:\n%s", code, out)
 	}
 
-	// Now should be allowed (if we update the policy to accept the new key)
-	// For this test, we'll just verify that a new session was recorded
+	// After new session, the re-signed skill should be allowed
+	code, out = runHook(t, "pre-tool-use", []byte(input), "--policy", policyDest)
+	if code != ExitSuccess {
+		t.Fatalf("pre-tool-use after new session exit = %d, output:\n%s", code, out)
+	}
+	if strings.TrimSpace(out) != "" {
+		t.Errorf("expected empty output after new session (allowed), got: %s", out)
+	}
 }
 
 func TestPreToolUseUnsignedStrictAndReportOnly(t *testing.T) {
@@ -692,5 +698,202 @@ func TestExitCodeConstants(t *testing.T) {
 	// Verify ExitError is 2 (required by the spec)
 	if ExitError != 2 {
 		t.Errorf("ExitError = %d, must be 2", ExitError)
+	}
+}
+
+func TestPluginOptionsFromEnvironment(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CLAUDE_PLUGIN_DATA", filepath.Join(home, ".claude"))
+	t.Setenv("CLAUDE_PROJECT_DIR", "")
+
+	setupHookTest(t, home, "cli-test", false)
+	policyPath := filepath.Join(home, "policy.json")
+
+	// Set plugin options via environment
+	t.Setenv("CLAUDE_PLUGIN_OPTION_POLICY", policyPath)
+	t.Setenv("CLAUDE_PLUGIN_OPTION_STRICT", "false")
+
+	input := `{
+		"session_id": "test-session",
+		"cwd": "/tmp",
+		"hook_event_name": "PreToolUse",
+		"tool_name": "Skill",
+		"tool_input": {
+			"skill": "cli-test"
+		},
+		"permission_mode": "default"
+	}`
+
+	// No --policy flag, should use env
+	code, out := runHook(t, "pre-tool-use", []byte(input))
+	if code != ExitSuccess {
+		t.Fatalf("exit = %d, output:\n%s", code, out)
+	}
+	if strings.TrimSpace(out) != "" {
+		t.Errorf("expected empty output for allowed skill, got: %s", out)
+	}
+}
+
+func TestPluginOptionsFlagOverridesEnv(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CLAUDE_PLUGIN_DATA", filepath.Join(home, ".claude"))
+	t.Setenv("CLAUDE_PROJECT_DIR", "")
+
+	setupHookTest(t, home, "cli-test", true) // tampered
+	policyPath := filepath.Join(home, "policy.json")
+
+	// Set wrong policy in env
+	t.Setenv("CLAUDE_PLUGIN_OPTION_POLICY", "/fake/wrong.json")
+	t.Setenv("CLAUDE_PLUGIN_OPTION_STRICT", "false")
+
+	input := `{
+		"session_id": "test-session",
+		"cwd": "/tmp",
+		"hook_event_name": "PreToolUse",
+		"tool_name": "Skill",
+		"tool_input": {
+			"skill": "cli-test"
+		},
+		"permission_mode": "default"
+	}`
+
+	// Flag overrides env
+	code, out := runHook(t, "pre-tool-use", []byte(input), "--policy", policyPath, "--strict=true")
+	if code != ExitSuccess {
+		t.Fatalf("exit = %d, output:\n%s", code, out)
+	}
+
+	var result map[string]any
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatalf("output is not JSON: %v\n%s", err, out)
+	}
+
+	hookOutput := result["hookSpecificOutput"].(map[string]any)
+	if hookOutput["permissionDecision"] != "deny" {
+		t.Errorf("strict flag should enforce deny, got: %v", hookOutput)
+	}
+}
+
+func TestStateDirWithCLAUDE_PLUGIN_DATA(t *testing.T) {
+	home := t.TempDir()
+	pluginData := filepath.Join(home, ".claude")
+	t.Setenv("HOME", home)
+	t.Setenv("CLAUDE_PLUGIN_DATA", pluginData)
+
+	stateDir := claudecode.StateDir()
+	expected := filepath.Join(pluginData, "sessions")
+	if stateDir != expected {
+		t.Errorf("StateDir() = %s, want %s", stateDir, expected)
+	}
+}
+
+func TestStateDirWithoutCLAUDE_PLUGIN_DATA(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CLAUDE_PLUGIN_DATA", "")
+
+	stateDir := claudecode.StateDir()
+	if !strings.Contains(stateDir, "skill-trust") || !strings.Contains(stateDir, "claude-code") || !strings.Contains(stateDir, "sessions") {
+		t.Errorf("StateDir() = %s, should contain skill-trust/claude-code/sessions", stateDir)
+	}
+}
+
+func TestPreToolUseSymlinkedSkillTampered(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CLAUDE_PLUGIN_DATA", filepath.Join(home, ".claude"))
+	t.Setenv("CLAUDE_PROJECT_DIR", "")
+
+	// Create skill in a temp src directory
+	srcDir := t.TempDir()
+	skillSrc := filepath.Join(srcDir, "foo")
+	if err := os.MkdirAll(filepath.Join(skillSrc, "scripts"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(filepath.Join(skillSrc, "SKILL.md"), []byte("---\nname: foo\n---\nTest.\n"), 0o644)
+	os.WriteFile(filepath.Join(skillSrc, "scripts/run.sh"), []byte("#!/usr/bin/env bash\necho hi\n"), 0o755)
+
+	// Sign it
+	keyPath, pubPath := newKey(t)
+	policyPath := keyPolicy(t, pubPath)
+	policyDest := filepath.Join(home, "policy.json")
+	policyData, err := os.ReadFile(policyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(policyDest, policyData, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	code, out := runCLI(t, "sign", skillSrc, "--key", keyPath)
+	if code != ExitSuccess {
+		t.Fatalf("sign exit = %d, output:\n%s", code, out)
+	}
+
+	// Tamper
+	os.WriteFile(filepath.Join(skillSrc, "SKILL.md"), []byte("---\nname: foo\n---\nTampered!\n"), 0o644)
+
+	// Symlink as ~/.claude/skills/foo
+	skillsDir := filepath.Join(home, ".claude", "skills")
+	if err := os.MkdirAll(skillsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	skillLink := filepath.Join(skillsDir, "foo")
+	if err := os.Symlink(skillSrc, skillLink); err != nil {
+		t.Fatal(err)
+	}
+
+	// Test via link path
+	inputLink := `{
+		"session_id": "test-session",
+		"cwd": "/tmp",
+		"hook_event_name": "PreToolUse",
+		"tool_name": "Read",
+		"tool_input": {
+			"file_path": "` + filepath.Join(skillLink, "SKILL.md") + `"
+		},
+		"permission_mode": "default"
+	}`
+
+	code, out = runHook(t, "pre-tool-use", []byte(inputLink), "--policy", policyDest)
+	if code != ExitSuccess {
+		t.Fatalf("exit = %d, output:\n%s", code, out)
+	}
+
+	var result map[string]any
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatalf("output is not JSON: %v\n%s", err, out)
+	}
+
+	hookOutput := result["hookSpecificOutput"].(map[string]any)
+	if hookOutput["permissionDecision"] != "deny" {
+		t.Errorf("symlinked path should deny, got: %v", hookOutput)
+	}
+
+	// Test via real path
+	inputReal := `{
+		"session_id": "test-session",
+		"cwd": "/tmp",
+		"hook_event_name": "PreToolUse",
+		"tool_name": "Read",
+		"tool_input": {
+			"file_path": "` + filepath.Join(skillSrc, "SKILL.md") + `"
+		},
+		"permission_mode": "default"
+	}`
+
+	code, out = runHook(t, "pre-tool-use", []byte(inputReal), "--policy", policyDest)
+	if code != ExitSuccess {
+		t.Fatalf("exit = %d, output:\n%s", code, out)
+	}
+
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatalf("output is not JSON: %v\n%s", err, out)
+	}
+
+	hookOutput = result["hookSpecificOutput"].(map[string]any)
+	if hookOutput["permissionDecision"] != "deny" {
+		t.Errorf("real path should also deny, got: %v", hookOutput)
 	}
 }

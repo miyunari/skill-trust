@@ -21,8 +21,17 @@ type State map[string]Record
 
 // StateDir returns the default state directory.
 func StateDir() string {
+	// Use $CLAUDE_PLUGIN_DATA/sessions when set
+	if pluginData := os.Getenv("CLAUDE_PLUGIN_DATA"); pluginData != "" {
+		return filepath.Join(pluginData, "sessions")
+	}
+	// Otherwise use user cache dir
+	if cacheDir, err := os.UserCacheDir(); err == nil {
+		return filepath.Join(cacheDir, "skill-trust", "claude-code", "sessions")
+	}
+	// Fallback
 	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".local", "state", "skill-trust")
+	return filepath.Join(home, ".cache", "skill-trust", "claude-code", "sessions")
 }
 
 // sanitizeSessionID cleans a session ID to prevent path traversal.

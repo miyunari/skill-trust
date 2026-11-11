@@ -3,6 +3,7 @@ package claudecode
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 
@@ -23,14 +24,70 @@ type HookInput struct {
 
 // Config holds the configuration for hook execution.
 type Config struct {
-	Policy      string                                                         // Path to the policy file
-	Strict      bool                                                           // Strict mode flag
-	StateDir    string                                                         // Directory for state files
-	PluginRoot  string                                                         // Plugin root directory (unused currently)
-	CLIVersion  string                                                         // CLI version string
-	Locations   Locations                                                      // Skill search locations
-	Now         func() time.Time                                               // Time function (for testing)
+	Policy      string                                              // Path to the policy file
+	Strict      bool                                                // Strict mode flag
+	StateDir    string                                              // Directory for state files
+	PluginRoot  string                                              // Plugin root directory (unused currently)
+	CLIVersion  string                                              // CLI version string
+	Locations   Locations                                           // Skill search locations
+	Now         func() time.Time                                    // Time function (for testing)
 	NewVerifier func(policyPath string) (preflight.Verifier, error) // Verifier constructor
+	Stderr      io.Writer                                           // Where to write SaveState errors (nil = discard)
+}
+
+// policyErrorVerifier wraps an error and returns it from VerifySkill.
+type policyErrorVerifier struct {
+	err error
+}
+
+func (e policyErrorVerifier) VerifySkill(root string) (preflight.Result, error) {
+	return preflight.Result{}, e.err
+}
+
+// decideOutcomes holds the results of deciding multiple roots.
+type decideOutcomes struct {
+	blocked  []Outcome
+	warnings []Outcome
+}
+
+// decideRoots runs Decide on each root, updates state, and classifies outcomes.
+func decideRoots(cfg Config, roots []string, sessionID string, verifier preflight.Verifier) decideOutcomes {
+	state := LoadState(cfg.StateDir, sessionID)
+
+	now := time.Now()
+	if cfg.Now != nil {
+		now = cfg.Now()
+	}
+
+	var blocked, warnings []Outcome
+
+	for _, root := range roots {
+		prev, hasPrev := state[root]
+		var prevPtr *Record
+		if hasPrev {
+			prevPtr = &prev
+		}
+
+		outcome, newRec := Decide(verifier, root, prevPtr, cfg.Strict, now)
+
+		if !outcome.Allowed && outcome.Block != nil {
+			blocked = append(blocked, outcome)
+		} else if outcome.Allowed && outcome.Warning != "" {
+			warnings = append(warnings, outcome)
+		}
+
+		// Update state if we got a new record
+		if newRec != nil {
+			state[root] = *newRec
+		}
+	}
+
+	// Save updated state
+	if err := SaveState(cfg.StateDir, sessionID, state); err != nil && cfg.Stderr != nil {
+		fmt.Fprintf(cfg.Stderr, "skill-trust: saving state: %v\n", err)
+	}
+
+	return decideOutcomes{blocked: blocked, warnings: warnings}
 }
 
 // PreToolUse handles the PreToolUse hook event. Returns nil for allowed tools
@@ -69,69 +126,23 @@ func PreToolUse(cfg Config, in HookInput) []byte {
 		return nil
 	}
 
-	// Construct verifier lazily
+	// Construct verifier lazily - errors become an erroring verifier
 	verifier, err := cfg.NewVerifier(cfg.Policy)
 	if err != nil {
-		// Verifier construction failed - treat as a block in strict mode
-		if cfg.Strict {
-			return denyJSON(fmt.Sprintf("policy error: %v", err))
-		}
-		return warningJSON(fmt.Sprintf("policy error (non-strict mode): %v", err))
+		verifier = policyErrorVerifier{err}
 	}
 
-	// Load previous state
-	state := LoadState(cfg.StateDir, in.SessionID)
-
-	// Check each skill root
-	now := time.Now()
-	if cfg.Now != nil {
-		now = cfg.Now()
-	}
-
-	var outcomes []Outcome
-	for _, root := range skillRoots {
-		prev, hasPrev := state[root]
-		var prevPtr *Record
-		if hasPrev {
-			prevPtr = &prev
-		}
-
-		outcome, newRec := Decide(verifier, root, prevPtr, cfg.Strict, now)
-		outcomes = append(outcomes, outcome)
-
-		// Update state if we got a new record
-		if newRec != nil {
-			state[root] = *newRec
-		}
-	}
-
-	// Save updated state
-	if err := SaveState(cfg.StateDir, in.SessionID, state); err != nil {
-		// Log but don't fail - state save is best-effort
-	}
-
-	// Determine overall result: deny if any is blocked, warn if any has warnings
-	var blocked []Outcome
-	var warnings []Outcome
-
-	for _, o := range outcomes {
-		if !o.Allowed && o.Block != nil {
-			blocked = append(blocked, o)
-		} else if o.Allowed && o.Warning != "" {
-			warnings = append(warnings, o)
-		}
-	}
+	outcomes := decideRoots(cfg, skillRoots, in.SessionID, verifier)
 
 	// If any blocked, return deny
-	if len(blocked) > 0 {
-		// Use the first blocked reason
-		return denyJSON(Reason(blocked[0]))
+	if len(outcomes.blocked) > 0 {
+		return denyJSON(Reason(outcomes.blocked[0]))
 	}
 
 	// If any warnings (report-only mode), return warning
-	if len(warnings) > 0 {
+	if len(outcomes.warnings) > 0 {
 		var parts []string
-		for _, w := range warnings {
+		for _, w := range outcomes.warnings {
 			parts = append(parts, w.Warning)
 		}
 		return warningJSON(strings.Join(parts, "\n"))
@@ -166,65 +177,23 @@ func UserPromptSubmit(cfg Config, in HookInput) []byte {
 		return nil
 	}
 
-	// Construct verifier lazily
+	// Construct verifier lazily - errors become an erroring verifier
 	verifier, err := cfg.NewVerifier(cfg.Policy)
 	if err != nil {
-		if cfg.Strict {
-			return blockPromptJSON(fmt.Sprintf("policy error: %v", err))
-		}
-		return warningPromptJSON(fmt.Sprintf("policy error (non-strict mode): %v", err))
+		verifier = policyErrorVerifier{err}
 	}
 
-	// Load previous state
-	state := LoadState(cfg.StateDir, in.SessionID)
-
-	now := time.Now()
-	if cfg.Now != nil {
-		now = cfg.Now()
-	}
-
-	// Check each resolved root
-	var outcomes []Outcome
-	for _, root := range roots {
-		prev, hasPrev := state[root]
-		var prevPtr *Record
-		if hasPrev {
-			prevPtr = &prev
-		}
-
-		outcome, newRec := Decide(verifier, root, prevPtr, cfg.Strict, now)
-		outcomes = append(outcomes, outcome)
-
-		// Update state if we got a new record
-		if newRec != nil {
-			state[root] = *newRec
-		}
-	}
-
-	// Save updated state
-	SaveState(cfg.StateDir, in.SessionID, state)
-
-	// Determine overall result
-	var blocked []Outcome
-	var warnings []Outcome
-
-	for _, o := range outcomes {
-		if !o.Allowed && o.Block != nil {
-			blocked = append(blocked, o)
-		} else if o.Allowed && o.Warning != "" {
-			warnings = append(warnings, o)
-		}
-	}
+	outcomes := decideRoots(cfg, roots, in.SessionID, verifier)
 
 	// If any blocked, return block
-	if len(blocked) > 0 {
-		return blockPromptJSON(Reason(blocked[0]))
+	if len(outcomes.blocked) > 0 {
+		return blockPromptJSON(Reason(outcomes.blocked[0]))
 	}
 
 	// If any warnings (report-only mode), return warning
-	if len(warnings) > 0 {
+	if len(outcomes.warnings) > 0 {
 		var parts []string
-		for _, w := range warnings {
+		for _, w := range outcomes.warnings {
 			parts = append(parts, w.Warning)
 		}
 		return warningPromptJSON(strings.Join(parts, "\n"))
@@ -248,21 +217,16 @@ func SessionStart(cfg Config, in HookInput) []byte {
 	// Discover all skills
 	discovered := cfg.Locations.Discover()
 
-	// If no skills, return minimal message
-	if len(discovered) == 0 {
-		msg := "skill-trust: 0 skills discovered"
-		if cfg.Policy == "" {
-			msg += "; policy not configured"
-		}
-		return sessionStartJSON(msg, "")
-	}
-
-	// Construct verifier (even if policy missing, to get consistent error handling)
+	// Construct verifier (even if policy missing or no skills, to get consistent error handling)
 	var verifier preflight.Verifier
 	var verifierErr error
 	if cfg.Policy != "" {
 		verifier, verifierErr = cfg.NewVerifier(cfg.Policy)
+		if verifierErr != nil {
+			verifier = policyErrorVerifier{verifierErr}
+		}
 	} else {
+		verifier = policyErrorVerifier{fmt.Errorf("policy not configured")}
 		verifierErr = fmt.Errorf("policy not configured")
 	}
 
@@ -281,20 +245,6 @@ func SessionStart(cfg Config, in HookInput) []byte {
 	newState := make(State)
 
 	for _, skill := range discovered {
-		if verifierErr != nil {
-			// Policy/verifier error - treat as block in strict mode
-			if cfg.Strict {
-				code := "ST-PREFLIGHT-VERIFIER-FAILURE"
-				blocked = append(blocked, struct {
-					Skill
-					Code string
-				}{skill, code})
-			} else {
-				allowed = append(allowed, skill)
-			}
-			continue
-		}
-
 		outcome, newRec := Decide(verifier, skill.Root, nil, cfg.Strict, now)
 
 		if outcome.Allowed {
@@ -312,10 +262,12 @@ func SessionStart(cfg Config, in HookInput) []byte {
 		}
 	}
 
-	// Save fresh state
-	SaveState(cfg.StateDir, in.SessionID, newState)
+	// Save fresh state (always, even for zero skills - re-baseline)
+	if err := SaveState(cfg.StateDir, in.SessionID, newState); err != nil && cfg.Stderr != nil {
+		fmt.Fprintf(cfg.Stderr, "skill-trust: saving state: %v\n", err)
+	}
 
-	// Build system message
+	// Build system message (always use N skills verified, M blocked format)
 	var msgParts []string
 	msgParts = append(msgParts, fmt.Sprintf("skill-trust: %d skills verified, %d blocked",
 		len(allowed), len(blocked)))
@@ -335,7 +287,7 @@ func SessionStart(cfg Config, in HookInput) []byte {
 		msgParts = append(msgParts, "; policy not configured")
 	}
 
-	systemMessage := strings.Join(msgParts, " ")
+	systemMessage := strings.Join(msgParts, "")
 
 	// Build additional context for blocked skills
 	var additionalContext string
@@ -356,9 +308,9 @@ func SessionStart(cfg Config, in HookInput) []byte {
 func denyJSON(reason string) []byte {
 	out := map[string]any{
 		"hookSpecificOutput": map[string]any{
-			"hookEventName":             "PreToolUse",
-			"permissionDecision":        "deny",
-			"permissionDecisionReason":  reason,
+			"hookEventName":            "PreToolUse",
+			"permissionDecision":       "deny",
+			"permissionDecisionReason": reason,
 		},
 	}
 	data, _ := json.Marshal(out)
@@ -368,8 +320,8 @@ func denyJSON(reason string) []byte {
 func warningJSON(context string) []byte {
 	out := map[string]any{
 		"hookSpecificOutput": map[string]any{
-			"hookEventName":      "PreToolUse",
-			"additionalContext":  context,
+			"hookEventName":     "PreToolUse",
+			"additionalContext": context,
 		},
 	}
 	data, _ := json.Marshal(out)

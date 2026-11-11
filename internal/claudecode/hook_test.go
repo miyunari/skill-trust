@@ -237,7 +237,6 @@ func TestUserPromptSubmitIgnoresNonSlashPrompts(t *testing.T) {
 	testCases := []string{
 		"hello world",
 		"use /test-skill to do something",
-		"  /test-skill",
 	}
 
 	for _, prompt := range testCases {
@@ -255,22 +254,103 @@ func TestUserPromptSubmitIgnoresNonSlashPrompts(t *testing.T) {
 	}
 }
 
-func TestSessionStartSummaryAndPruning(t *testing.T) {
+func TestUserPromptSubmitTrimsLeadingWhitespace(t *testing.T) {
+	home := t.TempDir()
+	skillRoot := filepath.Join(home, ".claude", "skills", "test-skill")
+	os.MkdirAll(skillRoot, 0o755)
+	os.WriteFile(filepath.Join(skillRoot, "SKILL.md"), []byte("# Test"), 0o644)
+
 	cfg := Config{
 		Policy:    "/fake/policy.json",
 		Strict:    true,
 		StateDir:  t.TempDir(),
-		Locations: Locations{Home: "/home/test", Cwd: "/tmp"},
-		Now: func() time.Time {
-			return time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-		},
+		Locations: Locations{Home: home, Cwd: "/tmp"},
 		NewVerifier: func(policyPath string) (preflight.Verifier, error) {
 			return testVerifier{
 				result: preflight.Result{
-					Decision:       preflight.Allow,
-					ManifestDigest: "sha256:abc123",
+					Decision: preflight.Block,
+					Findings: []preflight.Finding{{
+						Code:    "ST-TEST-BLOCKED",
+						Message: "test block",
+					}},
 				},
 			}, nil
+		},
+	}
+
+	in := HookInput{
+		SessionID:     "test",
+		Cwd:           "/tmp",
+		HookEventName: "UserPromptSubmit",
+		Prompt:        "  /test-skill do something",
+	}
+
+	result := UserPromptSubmit(cfg, in)
+	if result == nil {
+		t.Fatal("expected non-nil result for slash command with leading whitespace")
+	}
+
+	var output map[string]any
+	if err := json.Unmarshal(result, &output); err != nil {
+		t.Fatalf("invalid JSON output: %v\n%s", err, result)
+	}
+
+	if output["decision"] != "block" {
+		t.Errorf("decision = %v, want block", output["decision"])
+	}
+}
+
+func TestSessionStartSummaryAndPruning(t *testing.T) {
+	stateDir := t.TempDir()
+	home := t.TempDir()
+
+	// Create good and bad skills
+	goodRoot := filepath.Join(home, ".claude", "skills", "good-skill")
+	badRoot := filepath.Join(home, ".claude", "skills", "bad-skill")
+	os.MkdirAll(goodRoot, 0o755)
+	os.MkdirAll(badRoot, 0o755)
+	os.WriteFile(filepath.Join(goodRoot, "SKILL.md"), []byte("# Good"), 0o644)
+	os.WriteFile(filepath.Join(badRoot, "SKILL.md"), []byte("# Bad"), 0o644)
+
+	// Fake verifier: good-skill passes, bad-skill fails
+	fakeVer := fakeVerifier{
+		goodRoot: preflight.Result{
+			Decision:       preflight.Allow,
+			ManifestDigest: "sha256:abc123",
+		},
+		badRoot: preflight.Result{
+			Decision: preflight.Block,
+			Findings: []preflight.Finding{{
+				Code:    preflight.CodeVerifierFailure,
+				Message: "test failure",
+			}},
+		},
+	}
+
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+
+	// Create old state file (>7 days old)
+	oldStateFile := filepath.Join(stateDir, "state-old.json")
+	os.WriteFile(oldStateFile, []byte("{}"), 0o600)
+	oldTime := now.Add(-8 * 24 * time.Hour)
+	os.Chtimes(oldStateFile, oldTime, oldTime)
+
+	// Create fresh state file (<7 days old)
+	freshStateFile := filepath.Join(stateDir, "state-fresh.json")
+	os.WriteFile(freshStateFile, []byte("{}"), 0o600)
+	freshTime := now.Add(-1 * 24 * time.Hour)
+	os.Chtimes(freshStateFile, freshTime, freshTime)
+
+	cfg := Config{
+		Policy:    "/fake/policy.json",
+		Strict:    true,
+		StateDir:  stateDir,
+		Locations: Locations{Home: home, Cwd: "/tmp"},
+		Now: func() time.Time {
+			return now
+		},
+		NewVerifier: func(policyPath string) (preflight.Verifier, error) {
+			return fakeVer, nil
 		},
 	}
 
@@ -292,12 +372,16 @@ func TestSessionStartSummaryAndPruning(t *testing.T) {
 
 	systemMsg, ok := output["systemMessage"].(string)
 	if !ok || systemMsg == "" {
-		t.Errorf("missing or empty systemMessage: %v", output)
+		t.Fatalf("missing or empty systemMessage: %v", output)
 	}
 
-	// Should mention skills verified
-	if !strings.Contains(systemMsg, "skill") {
-		t.Errorf("systemMessage should mention skills: %s", systemMsg)
+	// Check exact summary counts
+	if !strings.Contains(systemMsg, "1 skills verified, 1 blocked") {
+		t.Errorf("systemMessage should say '1 skills verified, 1 blocked', got: %s", systemMsg)
+	}
+
+	if !strings.Contains(systemMsg, "bad-skill") {
+		t.Errorf("systemMessage should name bad-skill, got: %s", systemMsg)
 	}
 
 	hookOutput, ok := output["hookSpecificOutput"].(map[string]any)
@@ -307,5 +391,23 @@ func TestSessionStartSummaryAndPruning(t *testing.T) {
 
 	if hookOutput["hookEventName"] != "SessionStart" {
 		t.Errorf("hookEventName = %v, want SessionStart", hookOutput["hookEventName"])
+	}
+
+	additionalContext, ok := hookOutput["additionalContext"].(string)
+	if !ok || additionalContext == "" {
+		t.Fatalf("missing additionalContext for blocked skill: %v", hookOutput)
+	}
+
+	if !strings.Contains(additionalContext, "bad-skill") {
+		t.Errorf("additionalContext should name bad-skill, got: %s", additionalContext)
+	}
+
+	// Check pruning: old file should be gone, fresh file should remain
+	if _, err := os.Stat(oldStateFile); !os.IsNotExist(err) {
+		t.Errorf("old state file should have been pruned")
+	}
+
+	if _, err := os.Stat(freshStateFile); err != nil {
+		t.Errorf("fresh state file should not have been pruned: %v", err)
 	}
 }

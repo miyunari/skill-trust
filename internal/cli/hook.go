@@ -37,27 +37,7 @@ var sessionStartCmd = &cobra.Command{
 	Use:   "session-start",
 	Short: "Handle SessionStart hook event",
 	Run: func(cmd *cobra.Command, args []string) {
-		input, err := io.ReadAll(cmd.InOrStdin())
-		if err != nil {
-			fmt.Fprintf(cmd.ErrOrStderr(), "skill-trust: reading stdin: %v\n", err)
-			exitCode = ExitError
-			return
-		}
-
-		var hookInput claudecode.HookInput
-		if err := json.Unmarshal(input, &hookInput); err != nil {
-			fmt.Fprintf(cmd.ErrOrStderr(), "skill-trust: invalid JSON input: %v\n", err)
-			exitCode = ExitError
-			return
-		}
-
-		cfg := buildConfig(hookInput.Cwd)
-		result := claudecode.SessionStart(cfg, hookInput)
-
-		if result != nil {
-			cmd.OutOrStdout().Write(result)
-			cmd.OutOrStdout().Write([]byte("\n"))
-		}
+		runHookEvent(cmd)
 	},
 }
 
@@ -65,27 +45,7 @@ var preToolUseCmd = &cobra.Command{
 	Use:   "pre-tool-use",
 	Short: "Handle PreToolUse hook event",
 	Run: func(cmd *cobra.Command, args []string) {
-		input, err := io.ReadAll(cmd.InOrStdin())
-		if err != nil {
-			fmt.Fprintf(cmd.ErrOrStderr(), "skill-trust: reading stdin: %v\n", err)
-			exitCode = ExitError
-			return
-		}
-
-		var hookInput claudecode.HookInput
-		if err := json.Unmarshal(input, &hookInput); err != nil {
-			fmt.Fprintf(cmd.ErrOrStderr(), "skill-trust: invalid JSON input: %v\n", err)
-			exitCode = ExitError
-			return
-		}
-
-		cfg := buildConfig(hookInput.Cwd)
-		result := claudecode.PreToolUse(cfg, hookInput)
-
-		if result != nil {
-			cmd.OutOrStdout().Write(result)
-			cmd.OutOrStdout().Write([]byte("\n"))
-		}
+		runHookEvent(cmd)
 	},
 }
 
@@ -93,27 +53,7 @@ var userPromptSubmitCmd = &cobra.Command{
 	Use:   "user-prompt-submit",
 	Short: "Handle UserPromptSubmit hook event",
 	Run: func(cmd *cobra.Command, args []string) {
-		input, err := io.ReadAll(cmd.InOrStdin())
-		if err != nil {
-			fmt.Fprintf(cmd.ErrOrStderr(), "skill-trust: reading stdin: %v\n", err)
-			exitCode = ExitError
-			return
-		}
-
-		var hookInput claudecode.HookInput
-		if err := json.Unmarshal(input, &hookInput); err != nil {
-			fmt.Fprintf(cmd.ErrOrStderr(), "skill-trust: invalid JSON input: %v\n", err)
-			exitCode = ExitError
-			return
-		}
-
-		cfg := buildConfig(hookInput.Cwd)
-		result := claudecode.UserPromptSubmit(cfg, hookInput)
-
-		if result != nil {
-			cmd.OutOrStdout().Write(result)
-			cmd.OutOrStdout().Write([]byte("\n"))
-		}
+		runHookEvent(cmd)
 	},
 }
 
@@ -133,7 +73,7 @@ func init() {
 }
 
 func getStrictDefault() bool {
-	env := os.Getenv("SKILL_TRUST_STRICT")
+	env := os.Getenv("CLAUDE_PLUGIN_OPTION_STRICT")
 	if env == "" {
 		return true
 	}
@@ -144,9 +84,47 @@ func getStrictDefault() bool {
 	return strict
 }
 
-func buildConfig(cwd string) claudecode.Config {
-	// Resolve policy path - make absolute if relative
+func runHookEvent(cmd *cobra.Command) {
+	input, err := io.ReadAll(cmd.InOrStdin())
+	if err != nil {
+		fmt.Fprintf(cmd.ErrOrStderr(), "skill-trust: reading stdin: %v\n", err)
+		exitCode = ExitError
+		return
+	}
+
+	var hookInput claudecode.HookInput
+	if err := json.Unmarshal(input, &hookInput); err != nil {
+		fmt.Fprintf(cmd.ErrOrStderr(), "skill-trust: invalid JSON input: %v\n", err)
+		exitCode = ExitError
+		return
+	}
+
+	cfg := buildConfig(hookInput.Cwd, cmd.ErrOrStderr())
+
+	var result []byte
+	switch hookInput.HookEventName {
+	case "SessionStart":
+		result = claudecode.SessionStart(cfg, hookInput)
+	case "PreToolUse":
+		result = claudecode.PreToolUse(cfg, hookInput)
+	case "UserPromptSubmit":
+		result = claudecode.UserPromptSubmit(cfg, hookInput)
+	}
+
+	if result != nil {
+		cmd.OutOrStdout().Write(result)
+		cmd.OutOrStdout().Write([]byte("\n"))
+	}
+}
+
+func buildConfig(cwd string, stderr io.Writer) claudecode.Config {
+	// Policy path: flag > env > empty
 	policyPath := hookPolicyPath
+	if policyPath == "" {
+		policyPath = os.Getenv("CLAUDE_PLUGIN_OPTION_POLICY")
+	}
+
+	// Resolve policy path - make absolute if relative
 	if policyPath != "" && !filepath.IsAbs(policyPath) {
 		if abs, err := filepath.Abs(policyPath); err == nil {
 			policyPath = abs
@@ -159,6 +137,7 @@ func buildConfig(cwd string) claudecode.Config {
 		StateDir:   claudecode.StateDir(),
 		CLIVersion: Version().Version,
 		Locations:  claudecode.DefaultLocations(cwd),
+		Stderr:     stderr,
 		NewVerifier: func(path string) (preflight.Verifier, error) {
 			if path == "" {
 				return nil, fmt.Errorf("policy path not configured")
@@ -167,6 +146,22 @@ func buildConfig(cwd string) claudecode.Config {
 			if err != nil {
 				return nil, err
 			}
+
+			// Resolve relative paths in policy against policy file's directory
+			policyDir := filepath.Dir(path)
+			for i := range p.Signers {
+				s := &p.Signers[i]
+				if s.PublicKey != nil && s.PublicKey.Path != "" && !filepath.IsAbs(s.PublicKey.Path) {
+					s.PublicKey.Path = filepath.Join(policyDir, s.PublicKey.Path)
+				}
+			}
+			for name, root := range p.TrustRoots {
+				if root.Path != "" && !filepath.IsAbs(root.Path) {
+					root.Path = filepath.Join(policyDir, root.Path)
+					p.TrustRoots[name] = root
+				}
+			}
+
 			v, err := verify.New(p)
 			if err != nil {
 				return nil, err
